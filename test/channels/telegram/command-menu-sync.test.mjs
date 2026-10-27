@@ -105,9 +105,11 @@ test('runtime sends the complete localized production catalog before menu button
   assert.equal(commands.length, telegramCommandMenu().length);
   assert.equal(commands.find((item) => item.command === 'history').description,
     'Show recent history (private chats only)');
-  for (const command of ['history', 'reasoninglist', 'reasonings', 'reasoning']) {
+  // Commands get a row; the /reasonings alias does not, and stays typable.
+  for (const command of ['history', 'reasoninglist', 'reasoning']) {
     assert.ok(commands.some((item) => item.command === command));
   }
+  assert.ok(!commands.some((item) => item.command === 'reasonings'));
   assert.deepEqual(apiServer.calls[3].body, { menu_button: { type: 'commands' } });
   await runtime.start();
   assert.equal(menuCalls(apiServer).length, 1, 'start is idempotent while connected');

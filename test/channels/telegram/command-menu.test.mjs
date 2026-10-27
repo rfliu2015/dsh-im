@@ -8,13 +8,26 @@ import { isModelCommand } from '../../../src/channels/shared/model-command.mjs';
 import { TelegramApi } from '../../../src/channels/telegram/telegram-api.mjs';
 import { telegramCommandMenu } from '../../../src/channels/telegram/telegram-runtime.mjs';
 
+// Every supported spelling must stay usable. A hidden alias still parses; only
+// its menu slot is gone, so the menu carries one row per command.
 for (const command of ['history', 'reasoninglist', 'reasonings', 'reasoning']) {
-  test(`Telegram command menu includes the supported /${command} command`, () => {
+  test(`the supported /${command} command stays usable`, () => {
     assert.equal(isHistoryCommand(`/${command}`) || isModelCommand(`/${command}`), true);
+  });
+}
+
+for (const command of ['history', 'reasoninglist', 'reasoning']) {
+  test(`the production menu offers /${command}`, () => {
     assert.ok(telegramCommandMenu().some((item) => item.command === command),
       `Supported /${command} is missing from the production menu`);
   });
 }
+
+test('/reasonings stays typable but no longer takes a menu slot', () => {
+  assert.equal(isModelCommand('/reasonings'), true);
+  assert.ok(!telegramCommandMenu().some((item) => item.command === 'reasonings'),
+    'an alias must not duplicate its command in the menu');
+});
 
 function entry(name, options = {}) {
   return {
@@ -62,12 +75,24 @@ test('menu filters unsupported, disabled and hidden commands and aliases in stab
 test('real catalog preserves existing aliases and excludes channel-specific commands', () => {
   const names = telegramCommandMenu().map((item) => item.command);
   assert.deepEqual(names, [
-    'new', 'compact', 'clear', 'history', 'workspace',
-    'conv', 'conversation', 'thread',
-    'sessionlist', 'sessions', 'session', 'models', 'reasoninglist', 'reasonings',
-    'reasoning', 'model', 'presetlist', 'presets', 'preset', 'stop', 'steer',
-    'batch', 'send', 'cancel', 'notify', 'status', 'version', 'help',
+    // High-frequency block, in the order this bot's reader asked for.
+    'workspace', 'new', 'history', 'sessionlist', 'models', 'compact',
+    // Session and context.
+    'session', 'clear', 'conv',
+    // Model and preset.
+    'model', 'reasoning', 'reasoninglist', 'preset', 'presetlist',
+    // Task control.
+    'stop', 'steer',
+    // Batch entry.
+    'batch', 'send', 'cancel',
+    // Delivery and diagnostics.
+    'notify', 'status', 'version', 'help',
   ]);
+  // Aliases and the merged listing never take a slot of their own.
+  for (const alias of ['ws', 'workspacelist', 'workspaces', 'wsl', 'sessions',
+    'conversation', 'thread', 'reasonings', 'presets']) {
+    assert.ok(!names.includes(alias), `${alias} must not duplicate a command`);
+  }
   for (const name of ['repair', 'role', 'roles', 'menu', 'm']) assert.ok(!names.includes(name));
   assert.ok(Object.isFrozen(SHARED_COMMAND_CATALOG));
   for (const item of SHARED_COMMAND_CATALOG) {
@@ -86,7 +111,6 @@ test('all real menu descriptions localize on repeated host language changes', (t
     clear: 'Clear the current session context and keep the Session binding',
     history: 'Show recent history (private chats only)',
     reasoninglist: 'List reasoning efforts for the current model by index',
-    reasonings: 'List reasoning efforts for the current model by index',
     reasoning: 'Show or switch the current reasoning effort',
   };
   setImHostLanguage('zh');

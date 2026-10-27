@@ -224,12 +224,12 @@ test('Telegram API registers the command menu and commands-type menu button', as
   await api.setMyCommands({ commands: TELEGRAM_COMMAND_MENU });
   await api.setChatMenuButton();
   assert.equal(calls.length, 2);
+  // One row per command: the /presets alias stays typable without a menu slot.
   assert.deepEqual(
     TELEGRAM_COMMAND_MENU.filter(({ command }) => ['presetlist', 'presets', 'preset'].includes(command)),
     [
-      { command: 'presetlist', description: '列出可用 Agent Preset' },
-      { command: 'presets', description: '列出可用 Agent Preset' },
       { command: 'preset', description: '查看或设置新会话 Agent Preset' },
+      { command: 'presetlist', description: '列出可用 Agent Preset' },
     ],
   );
   assert.match(calls[0].url.pathname, /setMyCommands$/);
@@ -258,11 +258,15 @@ test('Telegram API registers the command menu and commands-type menu button', as
 });
 
 test('Telegram command menu follows the host language at runtime', () => {
-  assert.equal(TELEGRAM_COMMAND_MENU[0].description, '开启一个全新会话');
+  // The leading entry is the workspace picker; the assertion is about the
+  // language following the host, not about which command happens to be first.
+  assert.equal(TELEGRAM_COMMAND_MENU[0].command, 'workspace');
+  assert.equal(TELEGRAM_COMMAND_MENU[0].description, '查看或切换工作区');
   assert.equal(TELEGRAM_COMMAND_MENU.some(({ command }) => command === 'version'), true);
   setImHostLanguage('en');
   try {
-    assert.equal(telegramCommandMenu()[0].description, 'Start a brand-new Session');
+    assert.equal(telegramCommandMenu()[0].command, 'workspace');
+    assert.equal(telegramCommandMenu()[0].description, 'View or switch Workspace');
   } finally {
     setImHostLanguage('zh');
   }
