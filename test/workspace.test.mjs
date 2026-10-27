@@ -1355,11 +1355,12 @@ test('/sessionlist supports the current workspace, list numbers, and absolute pa
 
   const current = await runWorkspaceCommand('/SESSIONLIST', harness);
   assert.match(current.message, new RegExp(`工作区：${defaultWorkspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-  assert.match(current.message, /会话（3）/);
+  // The archived session is filtered out, so it neither counts nor takes an index.
+  assert.match(current.message, /会话（2）/);
   assert.match(current.message, /1\. 安全标题 伪造 4\. injected\n   ID: session-current/);
   assert.doesNotMatch(current.message, /\u202e|\n4\. injected/);
-  assert.match(current.message, /2\. 暂无标题（已归档）\n   ID: session-archived/);
-  assert.match(current.message, /3\. 标题暂不可用\n   ID: session-missing-summary/);
+  assert.doesNotMatch(current.message, /session-archived/);
+  assert.match(current.message, /2\. 标题暂不可用\n   ID: session-missing-summary/);
   assert.match(current.message, /绑定用法：\/session Session ID 或当前工作区序号（\/session N）/);
   assert.equal(current.messages.join(''), current.message);
 
@@ -1537,7 +1538,12 @@ test('/sessionlist splits a long complete session list without losing IDs', asyn
   assert.ok(result.messages.length > 1);
   assert.ok(result.messages.every((message) => message.length <= 1_800));
   assert.equal(result.messages.join(''), result.message);
-  for (const session of sessions) assert.ok(result.message.includes(session.sessionId));
+  for (const session of sessions.filter((item) => !item.archived)) {
+    assert.ok(result.message.includes(session.sessionId));
+  }
+  for (const session of sessions.filter((item) => item.archived)) {
+    assert.ok(!result.message.includes(session.sessionId), 'archived sessions stay out of the list');
+  }
 });
 
 test('the shared bridge sends every /sessionlist chunk without creating or prompting a session', async (t) => {

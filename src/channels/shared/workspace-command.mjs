@@ -294,6 +294,21 @@ async function currentSessionListWorkspace(harness, conversationKey) {
   return current ?? null;
 }
 
+/**
+ * The sessions a listing may show. Archived sessions stay out of every list:
+ * the archive already means "I am done with it", and a listing that keeps
+ * offering them buries the live ones. Deliberately unconditional -- a toggle
+ * would have to reach the conversation state store, and this module is shared
+ * by every channel, none of which agree on what a conversation key means.
+ *
+ * Index resolution in /session N MUST go through this same function: the
+ * numbers a listing prints and the numbers a bind resolves have to describe
+ * the same array, or a user binds a different session than the one they read.
+ */
+export function visibleSessions(sessions) {
+  return (Array.isArray(sessions) ? sessions : []).filter((session) => session?.archived !== true);
+}
+
 async function runSessionListCommand(match, harness, conversationKey) {
   const request = parseSessionListArgument(match[1]);
   if (request.error) return commandResult(request.error);
@@ -310,9 +325,12 @@ async function runSessionListCommand(match, harness, conversationKey) {
     harness.assertWorkspaceScope?.();
     const workspace = normalizedWorkspacePath(listed.workspace) ?? resolved.workspace;
     const currentWorkspace = await currentSessionListWorkspace(harness, conversationKey);
+    // Filter first: a --limit that counted archived sessions would return fewer
+    // than the caller asked for.
+    const visible = visibleSessions(listed.sessions);
     const sessions = request.limit === null
-      ? listed.sessions
-      : listed.sessions.slice(0, request.limit);
+      ? visible
+      : visible.slice(0, request.limit);
     const message = sessionListMessage(workspace, sessions, {
       currentWorkspace: workspace === currentWorkspace,
     });
@@ -371,12 +389,15 @@ async function runSessionBindCommand(command, harness, conversationKey) {
         throw new TypeError('Harness returned an invalid workspace session list');
       }
       harness.assertWorkspaceScope?.();
+      // Same array the listing printed, or the index would name a different
+      // session than the one the user read.
+      const candidates = visibleSessions(listed.sessions);
       const position = Number(sessionId);
       if (!Number.isSafeInteger(position) || position < 1
-        || position > listed.sessions.length) {
+        || position > candidates.length) {
         return commandResult(t('会话序号不存在，请先执行 /sessionlist 查看序号。'));
       }
-      const selectedSessionId = listed.sessions[position - 1]?.sessionId;
+      const selectedSessionId = candidates[position - 1]?.sessionId;
       if (!validSessionId(selectedSessionId)) {
         throw new TypeError('Harness returned an invalid session id');
       }

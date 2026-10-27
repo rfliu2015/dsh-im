@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { workspacePathSnapshot } from '../shared/workspace-command.mjs';
+import { visibleSessions, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { t } from '../shared/i18n.mjs';
 
 export const DINGTALK_MENU_TEMPLATE_ID = '9ca31362-e5b3-409c-a694-6993706a6004.schema';
@@ -41,7 +41,7 @@ export async function dingtalkMenuSnapshot(harness, state, key, signal) {
   }
   const [paths, listed, catalog, settings] = results.map((r) => r.status === 'fulfilled' ? r.value : null);
   const selections = {
-    session: [[t('新会话'), '/new'], ...(listed?.sessions ?? []).map((item) => [
+    session: [[t('新会话'), '/new'], ...visibleSessions(listed?.sessions).map((item) => [
       item.title || item.sessionId, `/session ${item.sessionId}`,
     ])],
     workspace: (paths?.paths ?? (workspace ? [workspace] : [])).map((path) => [path, `/workspace ${path}`]),

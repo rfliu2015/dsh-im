@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { ApiError } from '@tencent-connect/qqbot-nodejs';
-import { workspacePathSnapshot } from '../shared/workspace-command.mjs';
+import { visibleSessions, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { t } from '../shared/i18n.mjs';
 
 export const QQ_MENU_TTL_MS = 15 * 60_000;
@@ -92,8 +92,9 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
     ? harness.currentConversationWorkspace(key) : workspace;
   const sessionId = state.sessionFor(key);
   const options = { signal };
+  // The toggle still round-trips so an existing stored setting keeps its value,
+  // but it no longer decides anything: archived sessions stay hidden everywhere.
   const archived = state.includesArchivedSessions?.() === true;
-  const visibleSessions = (listed) => (listed?.sessions ?? []).filter((item) => archived || item.archived !== true);
   if (name === 'main' || name === 'status') {
     if (name === 'status') await harness.ensureRunning(options);
     const results = await Promise.allSettled([
@@ -129,7 +130,7 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
   }
   if (name === 'sessions') {
     const listed = await harness.listWorkspaceSessions(sessionWorkspace, options);
-    return qqMenuPage({ title: t('📋 会话列表'), detail: clean(sessionWorkspace), choices: visibleSessions(listed).map((item) =>
+    return qqMenuPage({ title: t('📋 会话列表'), detail: clean(sessionWorkspace), choices: visibleSessions(listed?.sessions).map((item) =>
       command(`${item.sessionId === sessionId ? '✓ ' : ''}${clean(item.title || item.sessionId, 70)}${item.archived ? t('（已归档）') : ''}`, `/session ${item.sessionId}`)) });
   }
   if (name === 'workspaces') {

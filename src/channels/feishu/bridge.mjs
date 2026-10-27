@@ -65,6 +65,7 @@ import {
   parseSessionListArgument,
   resolveSessionListWorkspace,
   runWorkspaceCommand,
+  visibleSessions,
   workspacePathSnapshot,
 } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
@@ -3105,12 +3106,14 @@ export class FeishuHarnessBridge {
     }
   }
 
-  /** The sessions visible under the bot's archived policy. */
+  /**
+   * The sessions visible under the bot's archived policy. The stored toggle is
+   * still read and written so an existing setting is not silently dropped, but
+   * it no longer decides anything: the shared filter hides archived sessions
+   * on every channel, and a channel-local exception would be a second policy.
+   */
   #visibleSessions(sessions) {
-    if (this.#state?.includesArchivedSessions?.() === false) {
-      return sessions.filter((session) => session.archived !== true);
-    }
-    return sessions;
+    return visibleSessions(sessions);
   }
 
   #conversationWorkspace(key) {

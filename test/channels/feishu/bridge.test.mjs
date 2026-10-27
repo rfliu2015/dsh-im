@@ -8161,7 +8161,7 @@ test('runtime abort stops the old event watcher before a new bridge starts', asy
   secondController.abort();
 });
 
-test('archived sessions are hidden by default; /archived on reveals them', async () => {
+test('archived sessions stay hidden even after /archived on', async () => {
   const { state } = await watchStoreFixture();
   const workRaw = join(tmpdir(), 'dsh-im-archived-test-work');
   mkdirSync(workRaw, { recursive: true });
@@ -8203,12 +8203,16 @@ test('archived sessions are hidden by default; /archived on reveals them', async
   assert.ok(state.watchEntry('p2p:ou_owner', 'live-session'));
   assert.equal(state.watchEntry('p2p:ou_owner', 'old-session'), null);
 
+  // The toggle still round-trips so a stored setting is not silently dropped,
+  // but it no longer reveals archived sessions: that filter is shared by every
+  // channel and a channel-local exception would be a second policy.
   await bridge.accept(event('archived-on', '/archived on', { senderOpenId: 'ou_owner' }));
   await bridge.waitForIdle();
+  assert.equal(state.includesArchivedSessions(), true);
   await bridge.accept(event('sessions-arch-2', '/sessionlist', { senderOpenId: 'ou_owner' }));
   await bridge.waitForIdle();
   const useOn = useActionsFromCard(cards.at(-1));
-  assert.deepEqual(useOn, ['live-session', 'old-session'], '/archived on restores archived sessions');
+  assert.deepEqual(useOn, ['live-session'], 'archived sessions stay hidden');
 });
 
 // ── stop / steer while a task is running (menu card interactions) ──────────

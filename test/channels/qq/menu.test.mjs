@@ -175,8 +175,10 @@ test('QQ archive visibility survives reload and never archives a session', async
   const restored = await new QqStateStore(join(f.dir, 'state.json')).load();
   assert.equal(restored.includesArchivedSessions(), true);
   assert.equal(restored.sessionFor(key), 'session-original');
+  // The stored toggle still round-trips, but it no longer reveals an archived
+  // session: the shared filter hides it on every channel.
   await f.send('/m sessions'); await f.pick(7);
-  assert.match(f.latestMenu().text, /已归档/);
+  assert.doesNotMatch(f.latestMenu().text, /已归档/);
   assert.equal(f.calls.length, 0);
   await f.send('/m'); await f.pick(11);
   assert.equal(f.state.includesArchivedSessions(), false);

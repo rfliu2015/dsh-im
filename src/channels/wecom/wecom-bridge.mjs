@@ -37,7 +37,7 @@ import {
   isPresetCommand,
   runPresetCommand,
 } from '../shared/preset-command.mjs';
-import { runWorkspaceCommand, workspacePathSnapshot } from '../shared/workspace-command.mjs';
+import { runWorkspaceCommand, visibleSessions, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import {
   captureContextEnhancement,
@@ -670,7 +670,7 @@ export class WecomHarnessBridge {
     ]);
     this.#signal?.throwIfAborted();
     const [paths, listed, catalog, settings] = settled.map((result) => result.status === 'fulfilled' ? result.value : null);
-    const sessions = (listed?.sessions ?? []).map((item) => [item.title || t('暂无标题'), `/session ${item.sessionId}`]);
+    const sessions = visibleSessions(listed?.sessions).map((item) => [item.title || t('暂无标题'), `/session ${item.sessionId}`]);
     const models = (catalog?.groups ?? []).flatMap((group) => group.models.map((model) => [
       `${model.name} (${group.id})`, `/model ${group.id}/${model.id}`,
     ]));
@@ -853,7 +853,7 @@ export class WecomHarnessBridge {
         if (menu.section === 'sessions') {
           title = t('📋 会话列表');
           const listed = await this.#harness.listWorkspaceSessions(this.#harness.currentWorkspace(), options);
-          entries = listed.sessions.map((session) => [
+          entries = visibleSessions(listed.sessions).map((session) => [
             `${session.sessionId === this.#state.sessionFor(key) ? '✓ ' : ''}${session.title || t('暂无标题')}`,
             `/session ${session.sessionId}`,
           ]);
