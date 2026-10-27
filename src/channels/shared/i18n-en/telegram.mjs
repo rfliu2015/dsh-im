@@ -14,6 +14,20 @@ export default {
   '正在切换工作区，请稍候。': 'Switching Workspaces, one moment.',
   '已经在工作区：{workspace}': 'Already in this Workspace: {workspace}',
   '暂时无法切换工作区，请稍后重试。': 'Could not switch Workspaces right now. Try again later.',
+  // Session card: the workspace picker's second message, one row per Session.
+  '选择要绑定的会话（共 {count} 个）：': 'Choose a Session to bind ({count} total):',
+  '新增会话': 'New Session',
+  '这个会话列表已过期，请重新发送 /ws。': 'This Session list has expired. Send /ws again.',
+  '正在绑定会话，请稍候。': 'Binding the Session, one moment.',
+  '已绑定会话。': 'Session bound.',
+  '已新建会话并绑定。': 'New Session created and bound.',
+  '已切换到第 {page} 页。': 'Moved to page {page}.',
+  '暂时无法翻页，请稍后重试。': 'Could not turn the page right now. Try again later.',
+  '已返回工作区列表，请重新选择。': 'Back to the Workspace list. Choose again.',
+  '当前机器人暂不支持新建会话。': 'This bot does not support creating Sessions.',
+  '机器人正在移除或已重新接入，无法新建会话。':
+    'The bot is being removed or has been reconnected, so a Session cannot be created.',
+  '暂时无法新建会话，请稍后重试。': 'Could not create a Session right now. Try again later.',
   '列出工作区绝对路径': 'List Workspace absolute paths',
   '列出会话 ID 和标题': 'List Session IDs and titles',
   '将当前聊天绑定到指定会话': 'Bind the current chat to a specific Session',
@@ -28,6 +42,11 @@ export default {
   '显示帮助': 'Show help',
   '该 Telegram 机器人已配置 Webhook，请先在原服务中移除 Webhook 后重试。':
     'This Telegram bot already has a Webhook configured. Remove the Webhook from the original service and try again.',
+  '未命名会话 {number}': 'Untitled Session {number}',
+  '选择要绑定的会话（共 {count} 个，第 {page}/{pages} 页）：':
+    'Choose a Session to bind ({count} total, page {page}/{pages}):',
+  '已经是这一页了。': 'This is already the current page.',
+  '第 {page}/{pages} 页。': 'Page {page}/{pages}.',
   'Telegram机器人': 'Telegram Bot',
   ' Bot API 长轮询': ' Bot API long polling',
 };

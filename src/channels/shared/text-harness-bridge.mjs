@@ -13,7 +13,13 @@ import {
   captureContextEnhancementSource,
   enhanceContextContent,
 } from './context-enhancement.mjs';
-import { runWorkspaceCommand, workspaceSwitchFailureText } from './workspace-command.mjs';
+import {
+  bindSessionToConversation,
+  createAndBindSession,
+  runWorkspaceCommand,
+  workspaceSessionListing,
+  workspaceSwitchFailureText,
+} from './workspace-command.mjs';
 import { runCompactCommand } from './compact-command.mjs';
 import { isClearCommand, runClearCommand } from './clear-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from './history-command.mjs';
@@ -80,6 +86,15 @@ import { beginStatusReaction } from './status-reaction.mjs';
 const MAX_WORKSPACE_CARDS = 50;
 const WORKSPACE_CARD_TTL_MS = 60 * 60 * 1000;
 const WORKSPACE_CARD_NONCE_BYTES = 9;
+/**
+ * Cap and TTL for the session-card snapshots. Same shape as the workspace
+ * picker: a press names a position, the snapshot in memory says what that
+ * position currently is, and an hour-old card is refused rather than binding a
+ * Session the user can no longer see.
+ */
+const MAX_SESSION_CARDS = 50;
+const SESSION_CARD_TTL_MS = 60 * 60 * 1000;
+const SESSION_CARD_NONCE_BYTES = 9;
 
 const INTERACTION_RESOLVED_TEXT = '这个问题已在其他客户端处理，无需再次回答。';
 const FILE_ONLY_COMPLETION_TEXT = '任务已完成。';
@@ -209,10 +224,15 @@ export class TextHarnessBridge {
   #batches = new BatchInputManager();
   #interactionCard;
   #workspaceCard;
+  #sessionCard;
   // Workspace picker snapshots by nonce: the press carries an index, not a path.
   #workspaceCards = new Map();
   // Conversation key → the one picker card that is still authoritative there.
   #workspaceCardKeys = new Map();
+  // Session-card snapshots by nonce: a Session id cannot ride in callback_data.
+  #sessionCards = new Map();
+  // Conversation key → the one session card that is still authoritative there.
+  #sessionCardKeys = new Map();
   #contextHooks = null;
   // Delivery attempts per message id. A failed turn releases its `markSeen` so
   // the next poll can retry, and this counter is what keeps that from becoming
@@ -241,6 +261,7 @@ export class TextHarnessBridge {
     keepaliveIntervalMs = 4_000,
     interactionCard = null,
     workspaceCard = null,
+    sessionCard = null,
     contextHooks = null,
     autoSteerSameSender = false,
     autoSteerLimit = 0,
@@ -263,6 +284,7 @@ export class TextHarnessBridge {
     this.#keepaliveIntervalMs = keepaliveIntervalMs;
     this.#interactionCard = interactionCard ?? null;
     this.#workspaceCard = workspaceCard ?? null;
+    this.#sessionCard = sessionCard ?? null;
     // Opt-in follow-up lanes for channels whose groups run on rapid consecutive
     // posts: fold a same sender's burst into one dispatch, and steer that
     // sender's own mid-turn follow-ups into the in-flight turn instead of
@@ -1840,6 +1862,8 @@ export class TextHarnessBridge {
     // namespace before the question bookkeeping so a press can never touch it.
     const workspacePress = this.#workspaceCard?.parse?.(callback.data) ?? null;
     if (workspacePress) return this.#handleWorkspaceCardPress(callback, key, workspacePress);
+    const sessionPress = this.#sessionCard?.parse?.(callback.data) ?? null;
+    if (sessionPress) return this.#handleSessionCardPress(callback, key, sessionPress);
     const pending = this.#pendingInteractions.get(key);
     const notice = (text) => this.#answerInteractionCallback(callback, text);
     if (!pending) return notice(t('该问题已处理，无需再次选择。'));
@@ -2057,6 +2081,17 @@ export class TextHarnessBridge {
           );
         }
       }
+      // The switch already succeeded, so the listing is a second message in its
+      // own try: a session list that cannot be read must never be reported as
+      // the switch having failed.
+      await this.#presentSessionCommand(callback.replyTarget ?? entry.target, key, current)
+        .catch((error) => {
+          this.#logger.warn?.(
+            `[dsh-im:${this.#descriptor.key}] unable to list sessions after a workspace switch:`,
+            error?.message ?? error,
+          );
+          return false;
+        });
       return await notice(t('工作区已切换为：{workspace}', { workspace: current }));
     } catch (error) {
       // Same classification as the typed command, so a card press and /ws N
@@ -2067,6 +2102,245 @@ export class TextHarnessBridge {
     } finally {
       entry.submitting = false;
     }
+  }
+
+  /**
+   * Send the sessions of one workspace, as a card, in a message of its own
+   * after the workspace picker. Returns false when no card was delivered, so
+   * the caller keeps the text list the channel already prints: a card that
+   * cannot render or cannot be sent must never swallow the listing.
+   *
+   * `selector` names the workspace to list. A press that just switched passes
+   * the path it switched to, because the switch moved the bot default while a
+   * /conv override would make a bare listing follow the override instead.
+   */
+  async #presentSessionCommand(target, conversationKey, selector = '') {
+    if (typeof this.#sessionCard?.render !== 'function'
+      || typeof this.#bot.sendInteractionCard !== 'function') return false;
+    const listing = await workspaceSessionListing(this.#harness, { conversationKey, selector });
+    if (listing.error || !Array.isArray(listing.sessions)) {
+      // A Harness that never supported session listing keeps its silence; a
+      // real failure is reported rather than reading as "no sessions".
+      if (listing.error && !listing.unsupported) {
+        await this.#bot.sendText(target, listing.error).catch((error) => {
+          this.#logger.warn?.(
+            `[dsh-im:${this.#descriptor.key}] unable to report a failed session listing:`,
+            error?.message ?? error,
+          );
+        });
+      }
+      return false;
+    }
+    return this.#sendSessionCard(target, conversationKey, listing, 0);
+  }
+
+  /** Render, remember, and deliver one session card; false means "use text". */
+  async #sendSessionCard(target, conversationKey, listing, page = 0) {
+    const nonce = randomBytes(SESSION_CARD_NONCE_BYTES).toString('base64url');
+    const card = this.#sessionCard.render(listing, { nonce, page });
+    // A card this channel cannot express — an unlabelled row, no sessions at
+    // all — still owes the reader the list. Rendering and sending fail the same
+    // way on purpose: the fallback below is the single exit.
+    if (!card) return this.#sendSessionText(target, listing);
+    const entry = {
+      listing,
+      key: conversationKey,
+      target,
+      page: card.page,
+      createdAt: Date.now(),
+      submitting: false,
+    };
+    this.#rememberSessionCard(nonce, entry);
+    try {
+      const sent = await this.#bot.sendInteractionCard(target, card);
+      entry.messageId = Array.isArray(sent?.providerMessageIds) && sent.providerMessageIds.length > 0
+        ? String(sent.providerMessageIds[0])
+        : undefined;
+      await this.#activateSessionCard(conversationKey, nonce);
+      return true;
+    } catch (error) {
+      // The snapshot is gone with the card, so the text list is now the only
+      // way to see these sessions.
+      this.#sessionCards.delete(nonce);
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to send the session card; `
+        + 'falling back to the text list:',
+        error?.message ?? error,
+      );
+      return this.#sendSessionText(target, listing);
+    }
+  }
+
+  /** The channel's own text list, the same one /sessionlist prints. */
+  async #sendSessionText(target, listing) {
+    try {
+      for (const reply of listing.messages ?? [listing.message]) {
+        await this.#bot.sendText(target, reply);
+      }
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to fall back to a session text list:`,
+        error?.message ?? error,
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Only one session card stays authoritative per conversation: the previous
+   * keyboard is retired the moment its replacement exists, so an index from a
+   * list the user has already moved past cannot bind anything.
+   */
+  async #activateSessionCard(conversationKey, nonce) {
+    const previousNonce = this.#sessionCardKeys.get(conversationKey);
+    this.#sessionCardKeys.set(conversationKey, nonce);
+    if (!previousNonce || previousNonce === nonce) return;
+    const previous = this.#sessionCards.get(previousNonce);
+    this.#sessionCards.delete(previousNonce);
+    if (!previous?.messageId) return;
+    await this.#retireCardKeyboard(previous.target, previous.messageId, previousNonce);
+  }
+
+  #rememberSessionCard(nonce, entry) {
+    const now = Date.now();
+    for (const [key, stored] of this.#sessionCards) {
+      if (now - stored.createdAt > SESSION_CARD_TTL_MS) this.#sessionCards.delete(key);
+    }
+    this.#sessionCards.set(nonce, entry);
+    while (this.#sessionCards.size > MAX_SESSION_CARDS) {
+      const oldest = this.#sessionCards.keys().next().value;
+      if (oldest === undefined) break;
+      this.#sessionCards.delete(oldest);
+    }
+  }
+
+  /** Answer a session-card press through the snapshot it was sent from. */
+  async #handleSessionCardPress(callback, key, press) {
+    if (this.#signal?.aborted) return;
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    const expired = t('这个会话列表已过期，请重新发送 /ws。');
+    const entry = this.#sessionCards.get(press.nonce);
+    if (!entry || entry.key !== key || Date.now() - entry.createdAt > SESSION_CARD_TTL_MS) {
+      // An identifiable card gets its dead keyboard removed so the same press is
+      // not offered again; a nonce this bridge never issued is only toasted.
+      if (entry && entry.key === key) {
+        this.#sessionCards.delete(press.nonce);
+        if (this.#sessionCardKeys.get(key) === press.nonce) this.#sessionCardKeys.delete(key);
+        await this.#retireCardKeyboard(
+          callback.replyTarget ?? entry.target,
+          String(callback.providerMessageId),
+          press.nonce,
+        );
+      }
+      return notice(expired);
+    }
+    const kind = callback.kind === 'group' ? 'group' : 'direct';
+    // A session button binds a Session, which is exactly what /session does, so
+    // it must pass the same command-permission gate: a keyboard cannot bypass it.
+    const decision = evaluateInboundAccess(this.#accessPolicy, {
+      conversationType: kind,
+      senderIds: [cleanText(callback.senderId)].filter(Boolean),
+      isCommand: true,
+    });
+    if (!decision.allowed) return notice(t(COMMAND_PERMISSION_DENIED_MESSAGE));
+    const target = callback.replyTarget ?? entry.target;
+    if (press.action === 'p') return this.#sessionCardPage(callback, entry, press);
+    if (press.action === 'r') return this.#sessionCardReturn(callback, key, entry);
+    // Claim synchronously, before the first await: a second press arriving
+    // while the bind is in flight must not bind a second time.
+    if (entry.submitting) return notice(t('正在绑定会话，请稍候。'));
+    entry.submitting = true;
+    try {
+      const created = press.action === 'n';
+      const result = created
+        ? await createAndBindSession(this.#harness, key)
+        : await this.#bindIndexedSession(entry, key, press.index);
+      if (result.error) return await notice(result.error);
+      // The card did its job for this press: drop the snapshot and the keyboard
+      // so the same row cannot be pressed again, then confirm in text.
+      this.#sessionCards.delete(press.nonce);
+      if (this.#sessionCardKeys.get(key) === press.nonce) this.#sessionCardKeys.delete(key);
+      await this.#retireCardKeyboard(target, String(callback.providerMessageId), press.nonce);
+      await notice(created ? t('已新建会话并绑定。') : t('已绑定会话。'));
+      for (const reply of result.messages ?? [result.message]) {
+        await this.#bot.sendText(target, reply);
+      }
+      return undefined;
+    } finally {
+      entry.submitting = false;
+    }
+  }
+
+  /**
+   * Show another page of the same snapshot. Body and keyboard are replaced
+   * together so the page number and the buttons cannot disagree; the nonce, the
+   * listing, and therefore every index stay identical, so page two names the
+   * same Session it named on page one.
+   */
+  async #sessionCardPage(callback, entry, press) {
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    if (typeof this.#bot.updateInteractionCard !== 'function') {
+      return notice(t('这个会话列表已过期，请重新发送 /ws。'));
+    }
+    const nonce = press.nonce;
+    const page = press.index ?? 0;
+    if (page === entry.page) return notice(t('已经是这一页了。'));
+    const card = this.#sessionCard.render(entry.listing, { nonce, page });
+    if (!card) return notice(t('这个会话列表已过期，请重新发送 /ws。'));
+    try {
+      await this.#bot.updateInteractionCard(
+        callback.replyTarget ?? entry.target,
+        String(callback.providerMessageId),
+        { markup: card.markup, text: card.text },
+      );
+      entry.page = card.page;
+      return notice(t('第 {page}/{pages} 页。', { page: card.page + 1, pages: card.pages }));
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to turn the session card page:`,
+        error?.message ?? error,
+      );
+      return notice(t('暂时无法翻页，请稍后重试。'));
+    }
+  }
+
+  /** Re-open the workspace picker: the same path /ws itself takes, unchanged. */
+  async #sessionCardReturn(callback, key, entry) {
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    if (entry.submitting) return notice(t('正在返回工作区列表，请稍候。'));
+    entry.submitting = true;
+    const target = callback.replyTarget ?? entry.target;
+    try {
+      const command = await runWorkspaceCommand('/ws', this.#harness, key);
+      const presented = command
+        ? await this.#presentWorkspaceCommand(target, command, key)
+        : false;
+      // Without a keyboard the listing still has to reach the reader; that is
+      // exactly what a channel without a picker prints for the same command.
+      if (!presented) {
+        for (const reply of command?.messages ?? [command?.message]) {
+          if (typeof reply === 'string') await this.#bot.sendText(target, reply);
+        }
+      }
+      return notice(t('已返回工作区列表，请重新选择。'));
+    } finally {
+      entry.submitting = false;
+    }
+  }
+
+  /**
+   * Resolve a pressed index through the card's own snapshot. The index is the
+   * visibleSessions() position the card printed, so an out-of-range press is
+   * refused rather than clamped onto a neighbouring Session.
+   */
+  async #bindIndexedSession(entry, key, index) {
+    const sessions = Array.isArray(entry.listing?.sessions) ? entry.listing.sessions : [];
+    const session = Number.isSafeInteger(index) ? sessions[index] : undefined;
+    const sessionId = session?.sessionId;
+    if (typeof sessionId !== 'string' || !sessionId) {
+      return { error: t('这个会话列表已过期，请重新发送 /ws。') };
+    }
+    return bindSessionToConversation(this.#harness, key, sessionId);
   }
 
   async presentSessionSyncApproval(interaction, context, options = {}) {

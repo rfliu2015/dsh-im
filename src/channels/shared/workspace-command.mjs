@@ -309,15 +309,24 @@ export function visibleSessions(sessions) {
   return (Array.isArray(sessions) ? sessions : []).filter((session) => session?.archived !== true);
 }
 
-async function runSessionListCommand(match, harness, conversationKey) {
-  const request = parseSessionListArgument(match[1]);
-  if (request.error) return commandResult(request.error);
+/**
+ * The session listing as data, not as text: the workspace it describes, the
+ * sessions it may show, and the message a channel without a picker prints.
+ *
+ * One function feeds both surfaces on purpose. A card resolves a press by index
+ * into `sessions`, and `/session N` resolves a number into the same
+ * visibleSessions() array, so a number a card prints and a session a press
+ * binds describe one array and cannot drift apart.
+ */
+export async function workspaceSessionListing(harness, { conversationKey, selector = '', limit = null } = {}) {
   if (typeof harness?.listWorkspaceSessions !== 'function') {
-    return commandResult(t('当前机器人暂不支持列出工作区会话。'));
+    // `unsupported` lets a card surface stay silent instead of reporting a
+    // capability this Harness never had; every other failure is reported.
+    return { unsupported: true, error: t('当前机器人暂不支持列出工作区会话。') };
   }
   try {
-    const resolved = await resolveSessionListWorkspace(request.selector, harness, { conversationKey });
-    if (resolved.error) return commandResult(resolved.error);
+    const resolved = await resolveSessionListWorkspace(selector, harness, { conversationKey });
+    if (resolved.error) return { error: resolved.error };
     const listed = await harness.listWorkspaceSessions(resolved.workspace);
     if (!listed || !Array.isArray(listed.sessions)) {
       throw new TypeError('Harness returned an invalid workspace session list');
@@ -328,19 +337,36 @@ async function runSessionListCommand(match, harness, conversationKey) {
     // Filter first: a --limit that counted archived sessions would return fewer
     // than the caller asked for.
     const visible = visibleSessions(listed.sessions);
-    const sessions = request.limit === null
+    const sessions = limit === null || limit === undefined
       ? visible
-      : visible.slice(0, request.limit);
+      : visible.slice(0, limit);
     const message = sessionListMessage(workspace, sessions, {
       currentWorkspace: workspace === currentWorkspace,
     });
-    return commandResult(message, splitWorkspaceCommandMessage(message));
+    return {
+      workspace,
+      sessions,
+      message,
+      messages: splitWorkspaceCommandMessage(message),
+    };
   } catch (error) {
     if (error?.code === 'workspace-bot-not-found') {
-      return commandResult(t('机器人正在移除或已重新接入，无法列出原会话的工作区会话。'));
+      return { error: t('机器人正在移除或已重新接入，无法列出原会话的工作区会话。') };
     }
-    return commandResult(t('暂时无法获取工作区会话列表，请稍后重试。'));
+    return { error: t('暂时无法获取工作区会话列表，请稍后重试。') };
   }
+}
+
+async function runSessionListCommand(match, harness, conversationKey) {
+  const request = parseSessionListArgument(match[1]);
+  if (request.error) return commandResult(request.error);
+  const listing = await workspaceSessionListing(harness, {
+    conversationKey,
+    selector: request.selector,
+    limit: request.limit,
+  });
+  if (listing.error) return commandResult(listing.error);
+  return commandResult(listing.message, listing.messages);
 }
 
 function sessionBindErrorMessage(error) {
@@ -368,6 +394,80 @@ function sessionBindErrorMessage(error) {
     return t('工作区或会话状态已发生变化，请重试。');
   }
   return t('暂时无法绑定会话，请稍后重试。');
+}
+
+/**
+ * Bind one known session id to the conversation and word the receipt.
+ *
+ * The typed `/session <id>` and a session-card press both land here: one
+ * binding path means a button cannot honour permissions, workspace scoping or
+ * failure classification differently from the command it stands for.
+ */
+export async function bindSessionToConversation(harness, conversationKey, sessionId) {
+  if (!validSessionId(sessionId)) return { error: t(SESSION_BIND_USAGE) };
+  if (typeof harness?.bindWorkspaceSession !== 'function') {
+    return { error: t('当前机器人暂不支持绑定已有会话。') };
+  }
+  if (typeof conversationKey !== 'string' || !conversationKey) {
+    return { error: t('当前消息缺少可绑定的会话上下文。') };
+  }
+  try {
+    const bound = await harness.bindWorkspaceSession(conversationKey, sessionId);
+    harness.assertWorkspaceScope?.();
+    const workspace = normalizedWorkspacePath(bound?.workspace);
+    const boundSessionId = safeDisplayText(bound?.sessionId);
+    if (!workspace || !boundSessionId) {
+      throw new TypeError('Harness returned an invalid bound session');
+    }
+    const title = safeDisplayText(bound?.title) || t('暂无标题');
+    const message = [
+      t('当前聊天已绑定会话：'),
+      t('工作区：{workspace}', { workspace }),
+      t('标题：{title}', { title }),
+      `ID：${boundSessionId}`,
+      t('归档：{archived}', { archived: bound?.archived === true ? t('是') : t('否') }),
+      t('发送 /history 查看最近对话。'),
+    ].join('\n');
+    return { sessionId: boundSessionId, workspace, message, messages: splitWorkspaceCommandMessage(message) };
+  } catch (error) {
+    return { error: sessionBindErrorMessage(error) };
+  }
+}
+
+/**
+ * Create a session in the conversation's effective workspace and bind it in one
+ * step. The Host scopes `createSession({ conversationKey })` to that workspace
+ * and fences it against a concurrent /conv, so the created session is adopted
+ * exactly like `/session` adopts a listed one.
+ */
+export async function createAndBindSession(harness, conversationKey) {
+  if (typeof harness?.createSession !== 'function'
+    || typeof harness?.bindWorkspaceSession !== 'function') {
+    return { error: t('当前机器人暂不支持新建会话。') };
+  }
+  if (typeof conversationKey !== 'string' || !conversationKey) {
+    return { error: t('当前消息缺少可绑定的会话上下文。') };
+  }
+  let sessionId;
+  try {
+    sessionId = await harness.createSession({ conversationKey });
+    harness.assertWorkspaceScope?.();
+  } catch (error) {
+    if (error?.code === 'workspace-bot-not-found') {
+      return { error: t('机器人正在移除或已重新接入，无法新建会话。') };
+    }
+    if ([WORKSPACE_SESSION_STALE, 'agent-busy', 'session-conflict', 'workspace-conflict']
+      .includes(error?.code)) {
+      return { error: t('工作区或会话状态已发生变化，请重试。') };
+    }
+    return { error: t('暂时无法新建会话，请稍后重试。') };
+  }
+  if (!validSessionId(sessionId)) {
+    return { error: t('暂时无法新建会话，请稍后重试。') };
+  }
+  // A created session that cannot be adopted is reported through the same
+  // mapping /session uses, never as a creation failure.
+  return bindSessionToConversation(harness, conversationKey, sessionId);
 }
 
 async function runSessionBindCommand(command, harness, conversationKey) {
@@ -409,34 +509,9 @@ async function runSessionBindCommand(command, harness, conversationKey) {
       return commandResult(t('暂时无法获取会话列表，请稍后重试。'));
     }
   }
-  if (!validSessionId(sessionId)) return commandResult(t(SESSION_BIND_USAGE));
-  if (typeof harness?.bindWorkspaceSession !== 'function') {
-    return commandResult(t('当前机器人暂不支持绑定已有会话。'));
-  }
-  if (typeof conversationKey !== 'string' || !conversationKey) {
-    return commandResult(t('当前消息缺少可绑定的会话上下文。'));
-  }
-  try {
-    const bound = await harness.bindWorkspaceSession(conversationKey, sessionId);
-    harness.assertWorkspaceScope?.();
-    const workspace = normalizedWorkspacePath(bound?.workspace);
-    const boundSessionId = safeDisplayText(bound?.sessionId);
-    if (!workspace || !boundSessionId) {
-      throw new TypeError('Harness returned an invalid bound session');
-    }
-    const title = safeDisplayText(bound?.title) || t('暂无标题');
-    const message = [
-      t('当前聊天已绑定会话：'),
-      t('工作区：{workspace}', { workspace }),
-      t('标题：{title}', { title }),
-      `ID：${boundSessionId}`,
-      t('归档：{archived}', { archived: bound?.archived === true ? t('是') : t('否') }),
-      t('发送 /history 查看最近对话。'),
-    ].join('\n');
-    return commandResult(message, splitWorkspaceCommandMessage(message));
-  } catch (error) {
-    return commandResult(sessionBindErrorMessage(error));
-  }
+  const bound = await bindSessionToConversation(harness, conversationKey, sessionId);
+  if (bound.error) return commandResult(bound.error);
+  return commandResult(bound.message, bound.messages);
 }
 
 async function runConversationWorkspaceCommand(command, harness, conversationKey) {

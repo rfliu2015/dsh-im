@@ -590,7 +590,7 @@ export class TelegramApi {
     this.#logger?.warn?.(message);
   }
 
-  async editMessageText({ chatId, messageId, text, richMessage, signal }) {
+  async editMessageText({ chatId, messageId, text, richMessage, replyMarkup, signal }) {
     if ((text === undefined) === (richMessage === undefined)) {
       throw new TypeError('Telegram message edit requires exactly one of text or richMessage');
     }
@@ -601,6 +601,9 @@ export class TelegramApi {
         text,
         link_preview_options: { is_disabled: true },
       }),
+      // A card whose body states the page has to change its keyboard and its
+      // text together, or the two would disagree about which page is showing.
+      ...(replyMarkup === undefined ? {} : { reply_markup: inputReplyMarkup(replyMarkup) }),
     }, { signal });
   }
 

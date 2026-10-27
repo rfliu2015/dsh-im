@@ -775,8 +775,23 @@ export class TelegramBotClient {
     return { providerMessageIds };
   }
 
-  /** Replace a delivered card's keyboard in place; an empty keyboard removes it. */
-  async updateInteractionCard(target, providerMessageId, { markup } = {}) {
+  /**
+   * Replace a delivered card in place: its keyboard alone, or its body and
+   * keyboard together when `text` is given. A card whose body states the page
+   * must update both, or the text and the buttons disagree about the page.
+   * An empty keyboard removes it.
+   */
+  async updateInteractionCard(target, providerMessageId, { markup, text } = {}) {
+    if (typeof text === 'string') {
+      await this.#api.editMessageText({
+        chatId: target.chatId,
+        messageId: Number(providerMessageId),
+        text,
+        ...(markup === undefined ? {} : { replyMarkup: markup }),
+        signal: this.#signal,
+      });
+      return;
+    }
     await this.#api.editMessageReplyMarkup({
       chatId: target.chatId,
       messageId: Number(providerMessageId),
