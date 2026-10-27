@@ -366,7 +366,9 @@ async function runSessionListCommand(match, harness, conversationKey) {
     limit: request.limit,
   });
   if (listing.error) return commandResult(listing.error);
-  return commandResult(listing.message, listing.messages);
+  // `listing` is the machine-readable half, so a channel with a picker renders
+  // the same rows the text list would have printed -- one source, two surfaces.
+  return commandResult(listing.message, listing.messages, { listing });
 }
 
 function sessionBindErrorMessage(error) {

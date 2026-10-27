@@ -559,3 +559,32 @@ test('the page number travels with the keyboard on every turn', async () => {
   await step('上一页', '第 2/3 页');
 });
 
+
+test('/sessionlist renders the same card instead of the text list', async () => {
+  const { paths } = await workspaceFixture(2);
+  const sessions = sessionFixture(3);
+  const fixture = bridgeFixture({ paths, sessions });
+
+  await fixture.bridge.accept(message('/sessionlist'));
+
+  // A channel with a picker turns the command into buttons, not text.
+  assert.equal(fixture.cards.length, 1, 'the listing arrives as one card');
+  const card = sessionCard(fixture.cards);
+  assert.match(card.text, /选择要绑定的会话（共 3 个）/);
+  assert.deepEqual(
+    sessionButtons(card).map((button) => button.text),
+    ['1. 会话 1', '2. 会话 2', '3. 会话 3'],
+  );
+});
+
+test('/sessionlist keeps the text list when the channel has no session card', async () => {
+  const { paths } = await workspaceFixture(2);
+  const sessions = sessionFixture(3);
+  const fixture = bridgeFixture({ paths, sessions, sessionCard: null });
+
+  await fixture.bridge.accept(message('/sessionlist'));
+
+  assert.equal(fixture.cards.length, 0, 'no card without a picker');
+  assert.ok(fixture.sent.length > 0, 'the text list still arrives');
+  assert.match(fixture.sent.join(''), /会话（3）/);
+});

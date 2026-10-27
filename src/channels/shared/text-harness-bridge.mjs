@@ -1167,6 +1167,11 @@ export class TextHarnessBridge {
       if (workspaceCommand && await this.#presentWorkspaceCommand(
         target, workspaceCommand, conversationKey,
       )) return;
+      // /sessionlist carries the same data /ws does, so a channel with a
+      // session picker renders it as buttons instead of the text list.
+      if (workspaceCommand && await this.#presentSessionListingCommand(
+        target, workspaceCommand, conversationKey,
+      )) return;
       if (workspaceCommand) {
         for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
           await this.#bot.sendText(target, reply);
@@ -2125,6 +2130,20 @@ export class TextHarnessBridge {
    * the path it switched to, because the switch moved the bot default while a
    * /conv override would make a bare listing follow the override instead.
    */
+  /**
+   * Present a command's own session listing as a card. The listing is already
+   * resolved by the command, so it is rendered as-is: re-resolving here could
+   * describe a different workspace than the text the caller would have sent.
+   */
+  async #presentSessionListingCommand(target, command, conversationKey) {
+    const listing = command?.listing;
+    if (!listing || !Array.isArray(listing.sessions)) return false;
+    if (typeof this.#sessionCard?.render !== 'function'
+      || typeof this.#bot.sendInteractionCard !== 'function') return false;
+    await this.#sendSessionCard(target, conversationKey, listing, 0);
+    return true;
+  }
+
   async #presentSessionCommand(target, conversationKey, selector = '') {
     if (typeof this.#sessionCard?.render !== 'function'
       || typeof this.#bot.sendInteractionCard !== 'function') return false;
