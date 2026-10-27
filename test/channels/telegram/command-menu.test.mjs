@@ -66,7 +66,7 @@ test('real catalog preserves existing aliases and excludes channel-specific comm
     'conv', 'conversation', 'thread',
     'sessionlist', 'sessions', 'session', 'models', 'reasoninglist', 'reasonings',
     'reasoning', 'model', 'presetlist', 'presets', 'preset', 'stop', 'steer',
-    'batch', 'send', 'cancel', 'status', 'version', 'help',
+    'batch', 'send', 'cancel', 'notify', 'status', 'version', 'help',
   ]);
   for (const name of ['repair', 'role', 'roles', 'menu', 'm']) assert.ok(!names.includes(name));
   assert.ok(Object.isFrozen(SHARED_COMMAND_CATALOG));

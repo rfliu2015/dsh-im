@@ -27,6 +27,9 @@
     "/batch  开始批量输入（仅私聊，最多 10 条文字）",
     "/send  提交当前批次",
     "/cancel  取消当前批次",
+    "/notify  查看当前通知模式",
+    "/notify always  同时接收 DSH 侧对话的回答",
+    "/notify default  只接收本聊天的问答结果",
     "/status  检查连接状态",
     "/version  查看插件版本",
     "/help  显示本帮助"
@@ -59,6 +62,9 @@
     "/batch  Start batch input (direct messages only, up to 10 text messages)",
     "/send  Submit the current batch",
     "/cancel  Cancel the current batch",
+    "/notify  show the current notification mode",
+    "/notify always  also receive replies from DSH-side chats",
+    "/notify default  receive this chat only",
     "/status  Check the connection status",
     "/version  Show the plugin version",
     "/help  Show this help"

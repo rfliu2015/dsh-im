@@ -93,6 +93,11 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
   defineCatalogCommand('cancel', '取消当前批次', [
     '/cancel  取消当前批次',
   ], { privateOnly: true }),
+  defineCatalogCommand('notify', '设置是否接收 DSH 侧对话的回答', [
+    '/notify  查看当前通知模式',
+    '/notify always  同时接收 DSH 侧对话的回答',
+    '/notify default  只接收本聊天的问答结果',
+  ]),
   defineCatalogCommand('status', '检查连接状态', [
     '/status  检查连接状态',
   ]),

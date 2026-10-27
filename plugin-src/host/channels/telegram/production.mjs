@@ -18,6 +18,11 @@ export function createProductionController(ctx, config = {}, internals = {}) {
     Runtime: TelegramRuntime,
     // The per-group reply rules list chats from the shared group archive.
     controllerGroupHistory: true,
+    // /notify drives the per-target Session sync the settings page also owns,
+    // so the Host's delivery service has to reach the channel runtime.
+    runtimeOptions: (config) => ({
+      ...(config.deliveryService ? { deliveryService: config.deliveryService } : {}),
+    }),
     // Speech recognition is a Host service (@deepseek-ai/dsh-experimental-speech-to-text);
     // the channel only converts the attachment and forwards the transcript.
     createVoiceTranscriber: (ctx) => createTelegramVoiceTranscriber({

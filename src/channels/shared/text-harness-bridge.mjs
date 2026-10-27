@@ -225,6 +225,9 @@ export class TextHarnessBridge {
   #interactionCard;
   #workspaceCard;
   #sessionCard;
+  // /notify reads and writes the per-target Session sync this service owns.
+  #deliveryService;
+  #botId;
   // Workspace picker snapshots by nonce: the press carries an index, not a path.
   #workspaceCards = new Map();
   // Conversation key → the one picker card that is still authoritative there.
@@ -262,6 +265,8 @@ export class TextHarnessBridge {
     interactionCard = null,
     workspaceCard = null,
     sessionCard = null,
+    deliveryService = null,
+    botId = null,
     contextHooks = null,
     autoSteerSameSender = false,
     autoSteerLimit = 0,
@@ -285,6 +290,8 @@ export class TextHarnessBridge {
     this.#interactionCard = interactionCard ?? null;
     this.#workspaceCard = workspaceCard ?? null;
     this.#sessionCard = sessionCard ?? null;
+    this.#deliveryService = deliveryService ?? null;
+    this.#botId = typeof botId === 'string' && botId ? botId : null;
     // Opt-in follow-up lanes for channels whose groups run on rapid consecutive
     // posts: fold a same sender's burst into one dispatch, and steer that
     // sender's own mid-turn follow-ups into the in-flight turn instead of
@@ -1148,6 +1155,10 @@ export class TextHarnessBridge {
       if (!hasImages && !hasFiles && command === '/status') {
         await this.#harness.ensureRunning({ signal: this.#signal });
         await this.#bot.sendText(target, t('{label}机器人与 DeepSeek Harness 连接正常。', { label: this.#descriptor.label }));
+        return;
+      }
+      if (!hasImages && !hasFiles && /^\/notify(?:\s|$)/iu.test(command)) {
+        await this.#bot.sendText(target, await this.#runNotifyCommand(command, target, conversationKey));
         return;
       }
       const workspaceCommand = !hasImages && !hasFiles
@@ -2343,6 +2354,64 @@ export class TextHarnessBridge {
     return bindSessionToConversation(this.#harness, key, sessionId);
   }
 
+  /**
+   * /notify — whether turns started outside this chat are mirrored here.
+   *
+   * 'default' leaves the chat alone: only what this bot itself answers comes
+   * back. 'always' turns on the per-target Session sync the settings page also
+   * writes, so a turn started in DSH also lands here. The two names describe the
+   * reader's intent; underneath there is one stored setting, never a second one.
+   */
+  async #runNotifyCommand(command, target, conversationKey) {
+    const usage = t('用法：/notify [always|default]');
+    const argument = command.replace(/^\/notify/iu, '').trim().toLowerCase();
+    const service = this.#deliveryService;
+    if (!service || typeof service.listTargets !== 'function'
+      || typeof service.setSessionSync !== 'function') {
+      return t('当前 Host 不支持会话同步，无法使用 /notify。');
+    }
+    if (argument && argument !== 'always' && argument !== 'default') return usage;
+    const botId = this.#botId;
+    if (typeof botId !== 'string' || !botId) return t('当前消息缺少机器人标识，无法使用 /notify。');
+    const chatId = String(target?.chatId ?? '').trim();
+    if (!/^-?\d+$/u.test(chatId)) return t('/notify 仅支持在私聊中使用。');
+
+    let listed;
+    try {
+      listed = await service.listTargets(botId);
+    } catch {
+      return t('暂时无法读取投递设置，请稍后重试。');
+    }
+    // One chat can own at most one target: the route is what identifies it.
+    const match = (listed?.targets ?? []).find((entry) => (
+      String(entry?.route?.chatId ?? '') === chatId
+      && String(entry?.kind ?? '') === 'chat'
+    )) ?? null;
+
+    if (!argument) {
+      const enabled = match?.sessionSync?.enabled === true;
+      return [
+        t('当前模式：{mode}', { mode: enabled ? t('always（含 DSH 侧回答）') : t('default（仅本聊天问答）') }),
+        enabled
+          ? t('/notify default  只接收本聊天的问答结果')
+          : t('/notify always  同时接收 DSH 侧对话的回答'),
+      ].join('\n');
+    }
+    if (argument === 'always' && !match) {
+      return t('这个聊天还没有投递目标。请先在 设置 → IM机器人 → 新建目标 中添加本聊天，再发送 /notify always。');
+    }
+    if (match?.sessionSync?.state === 'unavailable' && argument === 'always') {
+      return t('这个聊天还不能同步会话：请先在此对话中发送一条消息建立会话，再试一次。');
+    }
+    try {
+      await service.setSessionSync(botId, match.targetId, argument === 'always');
+    } catch {
+      return t('暂时无法修改通知设置，请稍后重试。');
+    }
+    return argument === 'always'
+      ? t('已开启：DSH 侧对话的回答也会发送到这里。')
+      : t('已关闭：只接收本聊天的问答结果。');
+  }
   async presentSessionSyncApproval(interaction, context, options = {}) {
     return this.#approvals.handleSessionSyncRequested(interaction, context, {
       ...options, runtimeSignal: this.#signal ?? options.runtimeSignal, accessPolicy: this.#accessPolicy,

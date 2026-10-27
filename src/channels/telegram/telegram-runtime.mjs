@@ -1399,6 +1399,7 @@ export class TelegramRuntime {
   #accessPolicy;
   #voice;
   #voiceTimeoutMs;
+  #deliveryService = null;
   #conversationQueue;
   /** Reasons already reported, so a broken recognizer logs once. */
   #voiceFailures = new Set();
@@ -1434,6 +1435,9 @@ export class TelegramRuntime {
     accessPolicy,
     voice = null,
     voiceTimeoutMs = 60_000,
+    // The Host delivery service owns per-target Session sync; /notify toggles
+    // the same setting the settings page writes, so it needs this handle.
+    deliveryService = null,
     logger = console,
     replyTimeoutMs = 600_000,
     createApi = (options) => new TelegramApi(options),
@@ -1455,6 +1459,9 @@ export class TelegramRuntime {
     this.#accessPolicy = accessPolicy;
     // null when the Host mounts no speech service; voice messages then stay textless.
     this.#voice = voice;
+    // null when this Host exposes no delivery service: /notify then reports
+    // that Session sync is unavailable instead of pretending to succeed.
+    this.#deliveryService = deliveryService;
     this.#voiceTimeoutMs = voiceTimeoutMs;
     // Voice prep and delivery are serialised per conversation, never per poll.
     this.#conversationQueue = createConversationQueue({
@@ -1581,6 +1588,9 @@ export class TelegramRuntime {
         bot: client,
         harness: this.#harness,
         state: this.#state,
+        // /notify reads and writes the per-target Session sync through this.
+        deliveryService: this.#deliveryService,
+        botId: this.#config?.botId,
         contextEnhancement: this.#contextEnhancement,
         accessPolicy: this.#accessPolicy,
         // Default ON; an explicit false in the bot config opts out.
