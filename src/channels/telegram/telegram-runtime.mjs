@@ -736,7 +736,14 @@ export class TelegramBotClient {
     this.#thinkingIntervalMs = normalizeThinkingIntervalSeconds(thinkingIntervalSeconds) * 1_000;
   }
 
-  async sendText(target, text) {
+  /**
+   * Deliver command output. `format: 'markdown'` renders it as rich text
+   * through the same sender an answer uses, so a command that echoes stored
+   * message bodies shows formatting instead of raw markdown source; anything
+   * else stays plain.
+   */
+  async sendText(target, text, { format = 'plain' } = {}) {
+    if (format === 'markdown') return this.#sendRich(target, { text, format });
     const chunks = splitTelegramRegularText(text);
     const providerMessageIds = [];
     for (const [index, chunk] of chunks.entries()) {

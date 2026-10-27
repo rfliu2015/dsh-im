@@ -1029,8 +1029,11 @@ export class TextHarnessBridge {
           this.#approvals.closeRoute(key),
         ]);
       }
+      // A command that echoes stored message bodies asks for markdown; a
+      // channel without a rich sender ignores the option and stays plain.
+      const format = result?.format === 'markdown' ? { format: 'markdown' } : {};
       for (const reply of result?.messages ?? [result?.message]) {
-        if (reply) await this.#bot.sendText(target, reply);
+        if (reply) await this.#bot.sendText(target, reply, format);
       }
       this.#status.lastError = null;
     } catch (error) {

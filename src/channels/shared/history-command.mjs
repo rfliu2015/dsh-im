@@ -83,7 +83,12 @@ function formatHistory(sessionId, records, requested, hasMore) {
     const sections = entries.map((entry, index) => (
       `${index + 1}. ${entry.role === 'user' ? t('用户') : t('助手')}\n${truncateText(entry.text, bodyLimit)}`
     ));
-    result = commandResult([header, ...sections, footer.join('\n')].join('\n\n'));
+    // The bodies are stored message text and keep their markdown, so a channel
+    // that can render should render this instead of printing the source.
+    result = {
+      ...commandResult([header, ...sections, footer.join('\n')].join('\n\n')),
+      format: 'markdown',
+    };
     bodyLimit = Math.floor(bodyLimit / 2);
   } while (bodyLimit > 0 && (result.message.length > 3_000 || result.messages.length > 3));
   return result;
