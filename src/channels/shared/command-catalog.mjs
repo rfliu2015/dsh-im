@@ -2,11 +2,13 @@ import { t } from './i18n.mjs';
 
 const TEXT_CHANNELS = Object.freeze(['telegram', 'slack', 'discord', 'whatsapp', 'matrix']);
 
-function defineCatalogCommand(name, description, help, { aliases = [], ...options } = {}) {
+function defineCatalogCommand(name, description, help, { aliases = [], channels = TEXT_CHANNELS, ...options } = {}) {
   return Object.freeze({
     name,
     description,
-    channels: TEXT_CHANNELS,
+    // Frozen like every other field: a caller must not be able to widen an
+    // entry's channel set after the catalog is declared.
+    channels: Object.freeze([...channels]),
     menuVisible: true,
     ...options,
     aliases: Object.freeze(aliases.map((alias) => Object.freeze({
@@ -43,7 +45,7 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
     '/new  开启一个全新会话',
   ]),
   defineCatalogCommand('history', '查看最近历史消息（仅私聊）', [
-    '/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）',
+    '/history [数量]  查看最近历史消息（默认 1 条，最多 5 条）',
   ], { privateOnly: true }),
   defineCatalogCommand('sessionlist', '列出会话 ID 和标题', [
     '/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题',
@@ -106,6 +108,8 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
     '/cancel  取消当前批次',
   ], { privateOnly: true }),
   // Delivery and diagnostics.
+  // Every TextHarnessBridge channel serves /notify; only Telegram wires the
+  // delivery service it drives, and the others report that plainly.
   defineCatalogCommand('notify', '设置是否接收 DSH 侧对话的回答', [
     '/notify  查看当前通知模式',
     '/notify always  同时接收 DSH 侧对话的回答',

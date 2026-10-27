@@ -256,9 +256,9 @@ function previewMarkers(sent) {
 }
 
 for (const channel of CHANNELS) {
-  test(`${channel}: /history defaults to 3 and /history 10 clamps to 5 on its existing reply route`, async () => {
+  test(`${channel}: /history defaults to 1 and /history 10 clamps to 5 on its existing reply route`, async () => {
     const f = fixture(channel);
-    for (const [text, count] of [['/history', 3], ['/history 10', 5]]) {
+    for (const [text, count] of [['/history', 1], ['/history 10', 5]]) {
       f.sent.length = 0;
       const id = `count-${count}`;
       await f.bridge.accept(f.message(id, text));
@@ -309,7 +309,7 @@ for (const channel of CHANNELS) {
     await Promise.all([f.bridge.accept(event), f.bridge.accept(event)]);
     await f.bridge.accept(event);
     assert.equal(f.calls.reads.length, 1);
-    assert.deepEqual(previewMarkers(f.sent), MARKERS.slice(-3));
+    assert.deepEqual(previewMarkers(f.sent), MARKERS.slice(-1));
     assert.deepEqual(f.calls.asks, []);
   });
 
@@ -394,7 +394,7 @@ for (const channel of CHANNELS) {
         const f = fixture(channel);
         await f.bridge.accept(f.message(`help-${language}`, '/help'));
         const help = f.sent.map(({ text }) => text).join('\n');
-        assert.match(help, /\/history.*3.*5/);
+        assert.match(help, /\/history[^\n]*1[^\n]*5/);
         if (language === 'en') assert.doesNotMatch(help, /[\u3400-\u9fff]/u);
         assert.deepEqual(f.calls.reads, []);
         assert.deepEqual(f.calls.asks, []);
@@ -458,7 +458,7 @@ test('Feishu mention-only group mode still ignores an unmentioned history comman
 
 test('Slack leading-space history messages normalize into the shared command without prompting', async () => {
   const f = fixture('slack');
-  for (const [text, count] of [[' /history', 3], [' /history 10', 5]]) {
+  for (const [text, count] of [[' /history', 1], [' /history 10', 5]]) {
     f.sent.length = 0;
     const message = normalizeSlackEvent({
       event_id: `history-leading-space-${count}`,

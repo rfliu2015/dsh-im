@@ -13,10 +13,10 @@ export default {
   '无法读取或写入{channel}配置。请检查其数据目录的访问权限，修复后重启 DSH。详细原因请查看启动日志。': 'The {channel} configuration could not be read or written. Check access to its data directory, then restart DSH. See the startup log for details.',
   '{channel}初始化失败。请展开诊断详情，并通过参考号查找 DSH 启动日志，修复后重启 DSH。': '{channel} initialization failed. Expand the diagnostic details and find the reference in the DSH startup log, fix the issue, then restart DSH.',
   // history-command.mjs / command help
-  '/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）':
-    '/history [count]  Preview recent messages (default 3, maximum 5)',
-  '用法：/history [数量]（默认 3 条，最多 5 条）':
-    'Usage: /history [count] (default 3, maximum 5)',
+  '/history [数量]  查看最近历史消息（默认 1 条，最多 5 条）':
+    '/history [count]  Preview recent messages (default 1, maximum 5)',
+  '用法：/history [数量]（默认 1 条，最多 5 条）':
+    'Usage: /history [count] (default 1, maximum 5)',
   '[图片]': '[Image]',
   '[文件]': '[File]',
   '本条没有可预览的文字。': 'This message has no text to preview.',

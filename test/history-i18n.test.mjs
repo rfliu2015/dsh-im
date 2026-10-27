@@ -45,13 +45,13 @@ function run(text, { events = [], error, sessionId = 'history-test', ...options 
 }
 
 test('/history English preview translates labels, truncation, and media placeholders', async () => {
-  const result = await run('/history', {
+  const result = await run('/history 3', {
     events: [
       user(1, [textBlock('Earlier user message')]),
       assistant(2, 1, [textBlock('Earlier assistant answer')]),
       end(3, 1),
       user(4, [textBlock('Recent user message'), { type: 'image' }, { type: 'file' }]),
-      assistant(5, 2, [textBlock('Long final answer. '.repeat(100))]),
+      assistant(5, 2, [textBlock('Long final answer. '.repeat(1_000))]),
       end(6, 2),
     ],
   });
@@ -67,11 +67,11 @@ test('/history English preview translates labels, truncation, and media placehol
 
 test('/history English usage covers the indirect HISTORY_USAGE translation key', async () => {
   for (const command of ['/history 0', '/history -1', '/history 1.5', '/history abc', '/history 1 2']) {
-    assert.equal((await run(command)).message, 'Usage: /history [count] (default 3, maximum 5)');
+    assert.equal((await run(command)).message, 'Usage: /history [count] (default 1, maximum 5)');
   }
   assert.equal(
-    t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
-    '/history [count]  Preview recent messages (default 3, maximum 5)',
+    t('/history [数量]  查看最近历史消息（默认 1 条，最多 5 条）'),
+    '/history [count]  Preview recent messages (default 1, maximum 5)',
   );
   assert.equal(t('发送 /history 查看最近对话。'), 'Send /history to preview recent conversation messages.');
 });
@@ -83,7 +83,7 @@ test('/history English validation and empty-history messages never fall back to 
   }
   assert.equal((await run('/history', { sessionId: null })).message, 'This chat has no bound Session. Send a message or use /session to bind one first.');
   assert.equal((await run('/history')).message, 'This Session has no history messages available to preview yet.');
-  const result = await run('/history', {
+  const result = await run('/history 3', {
     events: [assistant(1, 1, []), end(2, 1)],
   });
   assert.match(result.message, /1\. Assistant\nThis message has no text to preview\./);

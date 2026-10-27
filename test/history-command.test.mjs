@@ -93,10 +93,10 @@ function reply(result) {
   assert.equal(typeof result.message, 'string');
   assert.ok(result.message.length > 0);
   assert.ok(Array.isArray(result.messages));
-  assert.ok(result.messages.length > 0 && result.messages.length <= 3);
+  assert.ok(result.messages.length > 0 && result.messages.length <= 6);
   assert.equal(result.messages.join(''), result.message);
   assert.ok(result.messages.every((part) => typeof part === 'string' && part.length <= 1_800));
-  assert.ok(result.message.length <= 3_000);
+  assert.ok(result.message.length <= 10_000);
   return result.message;
 }
 
@@ -117,12 +117,12 @@ test('history reserves its command token, including malformed arguments, but not
   }
 });
 
-test('/history defaults to three individual messages, newest selected then oldest displayed', async () => {
+test('/history defaults to the single newest message', async () => {
   const current = fixture();
   const text = reply(await current.run());
-  assert.deepEqual(selectedMarkers(text), [
-    'history_assistant_3', 'history_user_4', 'history_assistant_4',
-  ]);
+  // One body by default: the point of the command is the last exchange, and
+  // three bodies pushed the newest one below the fold on a phone.
+  assert.deepEqual(selectedMarkers(text), ['history_assistant_4']);
   assert.match(text, /hist42/);
   assert.equal(current.calls.length, 1);
   assert.equal(current.calls[0].options.maxMessages, 50);
@@ -159,7 +159,7 @@ test('history omits stored history commands before applying the default and maxi
   const normalMessages = Array.from({ length: 3 }, (_, index) => [
     `history_user_${index + 1}`, `history_assistant_${index + 1}`,
   ]).flat();
-  for (const [command, count] of [['/history', 3], ['/history 10', 5]]) {
+  for (const [command, count] of [['/history', 1], ['/history 10', 5]]) {
     const current = fixture({ events });
     const text = reply(await current.run(command));
     assert.deepEqual(selectedMarkers(text), normalMessages.slice(-count));
@@ -170,7 +170,7 @@ test('history omits stored history commands before applying the default and maxi
 test('ordinary history text can mention /history or start with a different command token', async () => {
   const bodies = ['/history2', '请解释 /history 这个命令', '文档里也有 /history 10 的示例'];
   const current = fixture({ events: bodies.map((body, index) => user(index + 1, body)) });
-  const text = reply(await current.run());
+  const text = reply(await current.run('/history 3'));
   for (const body of bodies) assert.ok(text.includes(body), body);
 });
 
@@ -185,7 +185,7 @@ test('filtered history backfills older pages to reach three or five normal messa
       user(10, 'history_user_1'), user(11, 'history_user_2'), user(12, '/history 10'),
     ], hasMore: false },
   ];
-  for (const [command, count, reads] of [['/history', 3, 2], ['/history 10', 5, 3]]) {
+  for (const [command, count, reads] of [['/history 3', 3, 2], ['/history 10', 5, 3]]) {
     const current = fixture({ read: (_options, call) => pages[call - 1] });
     const text = reply(await current.run(command));
     assert.deepEqual(selectedMarkers(text), Array.from({ length: count }, (_, index) => (
@@ -248,7 +248,7 @@ test('history accepts completed reasons from both current and older Host protoco
       assistant(2, 1, 'history_assistant_1'),
       end(3, 1, reason),
     ] });
-    assert.deepEqual(selectedMarkers(reply(await current.run())), [
+    assert.deepEqual(selectedMarkers(reply(await current.run('/history 2'))), [
       'history_user_1', 'history_assistant_1',
     ]);
   }
@@ -298,9 +298,7 @@ test('history keeps a running user input but never shows its unfinished assistan
     entry(22, 'assistant/chunk', { turn: 2, chunk: { type: 'text-delta', text: PRIVATE_DETAIL } }),
   ] });
   const text = reply(await current.run());
-  assert.deepEqual(selectedMarkers(text), [
-    'history_user_1', 'history_assistant_1', 'history_user_2',
-  ]);
+  assert.deepEqual(selectedMarkers(text), ['history_user_2']);
   assert.doesNotMatch(text, new RegExp(PRIVATE_DETAIL, 'u'));
 });
 
@@ -388,9 +386,7 @@ test('history combines older pages with later terminal events and stops once eno
     return pages[call - 1];
   } });
   const text = reply(await current.run());
-  assert.deepEqual(selectedMarkers(text), [
-    'history_assistant_2', 'history_user_3', 'history_assistant_3',
-  ]);
+  assert.deepEqual(selectedMarkers(text), ['history_assistant_3']);
   assert.equal(current.calls.length, 2);
   assert.deepEqual(current.calls.map(({ options }) => options.beforeSeq), [undefined, 32]);
   assert.ok(current.calls.every(({ options }) => options.maxMessages === 50));
@@ -466,7 +462,7 @@ test('backfill keeps the first tail snapshot even if the Host includes newly app
     ? { events: [user(50, 'history_user_2')], hasMore: true }
     : { events: [user(40, 'history_user_1'), user(60, PRIVATE_DETAIL)], hasMore: false }
   });
-  const text = reply(await current.run());
+  const text = reply(await current.run('/history 2'));
   assert.deepEqual(selectedMarkers(text), ['history_user_1', 'history_user_2']);
   assert.doesNotMatch(text, new RegExp(PRIVATE_DETAIL, 'u'));
   assert.equal(current.calls.length, 2);
@@ -568,16 +564,16 @@ test('history truncates long Unicode and code text within shared message and chu
   assert.match(text, /截断|truncat/iu);
   assert.equal(text.isWellFormed(), true);
   assert.ok(result.messages.every((part) => part.isWellFormed()));
-  assert.ok(text.length <= 3_000);
-  assert.ok(result.messages.length <= 3);
-  assert.ok([...text.matchAll(/中文/gu)].length <= 500,
+  assert.ok(text.length <= 10_000);
+  assert.ok(result.messages.length <= 6);
+  assert.ok([...text.matchAll(/中文/gu)].length <= 3_000,
     'body text should be cut to the shared per-record budget, not merely split into more messages');
 });
 
-test('each history body has its own five-hundred-character bound', async () => {
-  const current = fixture({ events: [user(1, `${'Z'.repeat(499)}🙂${'Z'.repeat(2_000)}`)] });
+test('each history body has its own three-thousand-character bound', async () => {
+  const current = fixture({ events: [user(1, `${'Z'.repeat(2_999)}🙂${'Z'.repeat(5_000)}`)] });
   const text = reply(await current.run('/history 1'));
-  assert.ok((text.match(/Z/gu) ?? []).length <= 500);
+  assert.ok((text.match(/Z/gu) ?? []).length <= 3_000);
   assert.match(text, /截断|truncat/iu);
   assert.equal(text.isWellFormed(), true);
 });

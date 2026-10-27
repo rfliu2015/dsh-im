@@ -90,7 +90,7 @@ function helpText() {
     t('/clear  清空当前会话上下文（保留 Session 绑定和历史记录）'),
     t('/permissionlist  按序号列出权限档位'),
     t('/permission [序号或完整ID]  查看或切换当前会话权限'),
-    t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
+    t('/history [数量]  查看最近历史消息（默认 1 条，最多 5 条）'),
     t('/workspace 工作区序号或绝对路径  切换工作区'),
     t('/workspacelist  列出工作区绝对路径'),
     t('/ws、/wsl、/workspaces  工作区命令别名'),

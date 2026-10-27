@@ -6,8 +6,11 @@ import { splitWorkspaceCommandMessage } from './workspace-command.mjs';
 import { WORKSPACE_SESSION_STALE } from './workspace-session.mjs';
 
 const HISTORY_COMMAND = /^\/history(?=$|\s)([\s\S]*)$/iu;
-const HISTORY_USAGE = '用法：/history [数量]（默认 3 条，最多 5 条）';
+const HISTORY_USAGE = '用法：/history [数量]（默认 1 条，最多 5 条）';
 const MAX_MESSAGES = 5;
+// One message is the useful unit when the point is "what did we just say":
+// three bodies in one bubble is mostly the earlier, already-read context.
+const DEFAULT_MESSAGES = 1;
 const PAGE_SIZE = 50;
 const MAX_PAGES = 3;
 const READ_TIMEOUT_MS = 10_000;
@@ -77,7 +80,10 @@ function formatHistory(sessionId, records, requested, hasMore) {
       : t('当前会话仅有 {count} 条可预览消息。', { count: records.length }));
   }
   const entries = records.map((record) => ({ ...record, text: previewText(record.content) }));
-  let bodyLimit = 500;
+  // Telegram accepts ~4k characters per message and the splitter paginates
+  // beyond that, so a body no longer has to fit one small bubble. The halving
+  // loop below stays as the safety net for unusually long histories.
+  let bodyLimit = 3_000;
   let result;
   do {
     const sections = entries.map((entry, index) => (
@@ -90,7 +96,7 @@ function formatHistory(sessionId, records, requested, hasMore) {
       format: 'markdown',
     };
     bodyLimit = Math.floor(bodyLimit / 2);
-  } while (bodyLimit > 0 && (result.message.length > 3_000 || result.messages.length > 3));
+  } while (bodyLimit > 0 && (result.message.length > 10_000 || result.messages.length > 6));
   return result;
 }
 
@@ -121,7 +127,7 @@ export async function runHistoryCommand(text, harness, state, key, {
   if (argument && (!/^\d+$/u.test(argument) || /^0+$/u.test(argument))) {
     return commandResult(t(HISTORY_USAGE));
   }
-  const count = argument ? Math.min(Number(argument), MAX_MESSAGES) : 3;
+  const count = argument ? Math.min(Number(argument), MAX_MESSAGES) : DEFAULT_MESSAGES;
   if (!isDirect) return commandResult(t('请在与机器人的私聊中使用 /history。'));
   if (hasImages || hasFiles) return commandResult(t('/history 仅支持文字命令，请移除图片或文件后重试。'));
   const sessionId = state?.sessionFor?.(key);
