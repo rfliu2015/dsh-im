@@ -203,6 +203,12 @@ npx -y github:xmanrui/dsh-im install
 
 GitHub 源安装会直接拉取并构建 Git 依赖；pnpm 10 及以上版本可能要求先在 profile 的 `pnpm-workspace.yaml` 中允许该依赖执行构建脚本。普通用户建议优先使用 npm 稳定版。
 
+> **This fork**：上面的示例指向上游 `xmanrui/dsh-im`。安装本仓库（含 `/start` 等本地改动）请改用
+> `github:rfliu2015/dsh-im#main`，例如
+> `dsh plugin --profile desktop add -w github:rfliu2015/dsh-im#main`。
+> 注意包名仍是 `@xmanrui/dsh-im`，与 npm 官方版同位置，会互相覆盖；仓库没有 `prepare` 钩子，
+> 依赖已提交的 `lib/` 产物，改源码后必须 `npm run build`。
+
 安装后，在对应渠道页面按照内置引导完成扫码或凭据配置。所有 Secret 和 Token 只提交给本机 Harness Host，并写入受保护的凭据存储；状态接口和机器人列表不会回传这些凭据。
 
 如果本机必须通过正向代理访问飞书，请在启动 `dsh web` 前把 `HTTPS_PROXY` 设置为包含协议的 HTTP 代理 URL（例如 `http://proxy:8080`；也支持小写 `https_proxy`，并兼容使用 `HTTP_PROXY` 作为回退），修改后重启 Host。飞书注册和凭据验证会复用 SDK 的代理感知 HTTP 客户端，消息长连接会显式通过这个代理建立 WebSocket；长连接目前不读取 `ALL_PROXY` 或 `NO_PROXY`。
