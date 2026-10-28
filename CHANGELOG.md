@@ -6,6 +6,41 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-10-28
+
+### Added / 新增
+
+- 投递目标设置支持邮箱渠道，可显式填写收件人地址；不会把邮箱会话的 Message-ID 或 Session ID 当作地址自动生成目标。（[#451](https://github.com/xmanrui/dsh-im/pull/451)）
+  Delivery target settings now support email with an explicit recipient address. Email Message-IDs and Session IDs are not treated as recipient addresses for automatic target suggestions. ([#451](https://github.com/xmanrui/dsh-im/pull/451))
+
+### Fixed / 修复
+
+- 飞书停止运行时，为桥接层空闲等待设置 2 秒上限，避免未结束任务无限阻塞后续清理。（[#465](https://github.com/xmanrui/dsh-im/pull/465)）
+  Feishu shutdown now limits the bridge idle wait to 2 seconds so unfinished tasks cannot block subsequent cleanup indefinitely. ([#465](https://github.com/xmanrui/dsh-im/pull/465))
+- 修复带渠道图标的会话标题在滚动展示时仍被预先截断的问题，使长标题能够完整展示。（[#455](https://github.com/xmanrui/dsh-im/pull/455)）
+  Fixed channel-marked session titles remaining pre-clipped during marquee scrolling, allowing the full title to become visible. ([#455](https://github.com/xmanrui/dsh-im/pull/455))
+- 串行处理同路径更新状态文件的读写，Windows 原子替换遇到临时 EPERM 时有限重试并保留旧文件，避免并发状态查询损坏更新记录；同步修正跨平台测试基线。（[#456](https://github.com/xmanrui/dsh-im/pull/456)）
+  Serialized update-state reads and writes per path, with bounded retries for transient Windows EPERM during atomic replacement while preserving the old file. Concurrent status reads no longer disrupt update journals; cross-platform test baselines were also corrected. ([#456](https://github.com/xmanrui/dsh-im/pull/456))
+
+- 企业微信机器人被服务端断开后，若「正在连接」连续超过 2 分钟无状态更新，则自动重启连接；存活不足 5 分钟即再次掉线的连接与启动失败按 bot 共享 1–10 分钟指数退避，连接持续稳定 5 分钟后清零。正常 SDK 重连不受影响，手动重连始终立即执行。（[#420](https://github.com/xmanrui/dsh-im/pull/420)）
+  WeCom bots recover automatically when a server-side disconnect leaves them in "connecting" without a state update for over 2 minutes. Connections that drop again within 5 minutes and failed starts share per-bot exponential backoff from 1 to 10 minutes, cleared after 5 minutes of stable connectivity. Active SDK retries are unchanged, and manual reconnects remain immediate. ([#420](https://github.com/xmanrui/dsh-im/pull/420))
+
+- QQ 回复超时后迟到的结果改为在 QQ 被动回复窗口内（私聊 60 分钟、群 5 分钟，各留 30 秒余量）带原消息 `msg_id` 被动回复，不再一律走常被平台拒绝的主动消息；超时提示已占用的一次被动额度会计入。窗口外或平台明确拒绝被动回复时，回退为一次主动发送。
+  A late QQ result after a reply timeout is now sent as a passive reply to the original `msg_id` while QQ's window is open (C2C 60 min, group 5 min, each minus a 30 s margin), instead of always going out as a proactive message that QQ often refuses. The passive slot used by the timeout notice is counted. Outside the window, or when QQ definitely refuses the passive reply, it falls back to one proactive send.
+
+- Slack 流式定稿在追加失败或最终文本被重写时，改用 `chat.update` 的 `markdown_text`，不再以 `parse: none` 发送原始 GFM。Markdown block 被拒绝时先重试 `markdown_text`；只有 Markdown 本身被拒绝时才按字面文本发送，避免把 `**` 和表格当成 mrkdwn。（[#466](https://github.com/xmanrui/dsh-im/issues/466)）
+  Slack stream finalization now updates with `markdown_text` when appending fails or the final text is rewritten, instead of sending raw GFM with `parse: none`. A rejected Markdown block retries `markdown_text`; literal text is used only when the Markdown itself is rejected, so `**` and tables are not parsed as mrkdwn. ([#466](https://github.com/xmanrui/dsh-im/issues/466))
+
+### Security / 安全
+
+- 更新构建锁中的 qs 从 6.16.0 至 6.17.0 并重新构建 Host，纳入逗号数组序列化触发未捕获异常的修复（[GHSA-6pq8-jhm2-2vcw](https://github.com/advisories/GHSA-6pq8-jhm2-2vcw)）。
+  Updated build-lock qs from 6.16.0 to 6.17.0 and rebuilt the Host to include the fix for uncaught exceptions during comma-array serialization ([GHSA-6pq8-jhm2-2vcw](https://github.com/advisories/GHSA-6pq8-jhm2-2vcw)).
+
+### Notes / 使用说明
+
+- 中英文 README 新增赞助展示。依赖声明、Node.js 要求及 DSH 兼容声明保持不变；升级后重启 Host 并刷新管理页面。
+  Added sponsor information to the Chinese and English READMEs. Dependency declarations, Node.js requirements, and DSH compatibility declarations remain unchanged. Restart the Host and refresh management pages after upgrading.
+
 ## [5.6.0] - 2026-10-24
 
 ### Added / 新增
@@ -2040,7 +2075,8 @@ Thanks to [@Dong09](https://github.com/Dong09) for the Matrix conversation-conte
 - 改进 npm 发布包结构，保留 CLI 入口并避免安装脚本拦截。
   Improved npm package contents to preserve the CLI entry point and avoid install-script blocking.
 
-[Unreleased]: https://github.com/xmanrui/dsh-im/compare/v5.6.0...HEAD
+[Unreleased]: https://github.com/xmanrui/dsh-im/compare/v5.7.0...HEAD
+[5.7.0]: https://github.com/xmanrui/dsh-im/compare/v5.6.0...v5.7.0
 [5.6.0]: https://github.com/xmanrui/dsh-im/compare/v5.5.0...v5.6.0
 [5.5.0]: https://github.com/xmanrui/dsh-im/compare/v5.4.0...v5.5.0
 [5.4.0]: https://github.com/xmanrui/dsh-im/compare/v5.3.0...v5.4.0

@@ -948,7 +948,19 @@ export class FeishuRuntime {
     wsClient?.close({ force: true });
     const bridge = this.#bridge;
     this.#bridge = null;
-    if (bridge) await bridge.waitForIdle();
+    let timer;
+    try {
+      const idle = await Promise.race([
+        (bridge?.waitForIdle() ?? Promise.resolve()).then(() => true),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(false), 2_000);
+          timer.unref?.();
+        }),
+      ]);
+      if (!idle) this.#logger.warn?.('[dsh-feishu] bridge idle wait timed out after 2000ms; continuing cleanup');
+    } finally {
+      clearTimeout(timer);
+    }
     this.#client = null;
     this.#status.feishuLongConnectionState = preserveError ? 'failed' : 'idle';
     this.#status.slashCommandRegistration = 'idle';
