@@ -370,8 +370,12 @@ for (const failMethod of ['setMyCommands', 'deleteMyCommands', 'setChatMenuButto
 test('invalid catalog warns without sending a partial menu or blocking readiness', async (t) => {
   const apiServer = server();
   const warnings = [];
+  // A duplicate of a *visible* entry is what makes the list invalid: two copies
+  // of a hidden one would simply filter down to an empty, still-legal menu.
+  const visible = SHARED_COMMAND_CATALOG.find((item) => item.menuVisible !== false
+    && item.enabled !== false && item.channels.includes('telegram'));
   const runtime = runtimeFor(t, apiServer, {
-    commandCatalog: [SHARED_COMMAND_CATALOG[0], SHARED_COMMAND_CATALOG[0]],
+    commandCatalog: [visible, visible],
     logger: { warn: (...args) => warnings.push(args), error() {} },
   });
   await runtime.start();

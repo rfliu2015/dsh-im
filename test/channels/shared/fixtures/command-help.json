@@ -1,5 +1,6 @@
 {
   "zh": [
+    "/start  查看当前工作区与会话，并给出切换按钮",
     "/workspace 或 /ws  查看可切换的工作区（点按钮切换）",
     "/workspace 工作区序号或绝对路径  切换工作区",
     "/workspacelist、/wsl、/workspaces  工作区列表别名（等同 /ws）",
@@ -8,6 +9,7 @@
     "/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题",
     "/sessionlist --limit N  仅列出当前工作区前 N 个会话",
     "/models  按序号列出所有可用模型",
+    "/stop  停止当前任务",
     "/compact  压缩当前会话的较早上下文",
     "/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话",
     "/clear  清空当前会话上下文（保留 Session 绑定和历史记录）",
@@ -22,7 +24,6 @@
     "纯数字 ID：/preset id:<ID>",
     "/preset --default  跟随 Host 默认",
     "/presetlist 或 /presets  按序号列出可用 Agent Preset",
-    "/stop  停止当前任务",
     "/steer 补充指令  纠偏当前任务",
     "/batch  开始批量输入（仅私聊，最多 10 条文字）",
     "/send  提交当前批次",
@@ -35,6 +36,7 @@
     "/help  显示本帮助"
   ],
   "en": [
+    "/start  Show the current Workspace and Session, with buttons to switch",
     "/workspace or /ws  View switchable Workspaces (tap a button to switch)",
     "/workspace <workspace index or absolute path>  Switch workspace",
     "/workspacelist, /wsl, /workspaces  Workspace-list aliases (same as /ws)",
@@ -43,6 +45,7 @@
     "/sessionlist or /sessions [workspace index or absolute path]  List session IDs and titles",
     "/sessionlist --limit N  List only the first N sessions in the current workspace",
     "/models  List all available models by index",
+    "/stop  Stop the current task",
     "/compact  Compact the earlier context of the current session",
     "/session <Session ID or workspace index>  Bind this chat to the specified session",
     "/clear  Clear the current session context (keep the Session binding and history)",
@@ -57,7 +60,6 @@
     "Numeric-only ID: /preset id:<ID>",
     "/preset --default  Follow the Host default",
     "/presetlist or /presets  List available Agent Presets by index",
-    "/stop  Stop the current task",
     "/steer <additional instruction>  Steer the current task",
     "/batch  Start batch input (direct messages only, up to 10 text messages)",
     "/send  Submit the current batch",

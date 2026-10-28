@@ -76,13 +76,14 @@ test('real catalog preserves existing aliases and excludes channel-specific comm
   const names = telegramCommandMenu().map((item) => item.command);
   assert.deepEqual(names, [
     // High-frequency block, in the order this bot's reader asked for.
-    'workspace', 'new', 'history', 'sessionlist', 'models', 'compact',
+    // /start is deliberately absent: Telegram's own START button sends it.
+    'workspace', 'new', 'history', 'sessionlist', 'models', 'stop', 'compact',
     // Session and context.
     'session', 'clear', 'conv',
     // Model and preset.
     'model', 'reasoning', 'reasoninglist', 'preset', 'presetlist',
-    // Task control.
-    'stop', 'steer',
+    // Task control. /stop itself sits in the high-frequency block above.
+    'steer',
     // Batch entry.
     'batch', 'send', 'cancel',
     // Delivery and diagnostics.

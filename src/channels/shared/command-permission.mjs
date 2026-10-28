@@ -7,7 +7,7 @@ import { isModelCommand } from './model-command.mjs';
 import { isPresetCommand } from './preset-command.mjs';
 import { isWorkspaceCommand } from './workspace-command.mjs';
 
-const SIMPLE_TEXT_COMMANDS = new Set(['/help', '/status', '/new']);
+const SIMPLE_TEXT_COMMANDS = new Set(['/help', '/status', '/new', '/start']);
 
 /**
  * Match only commands that the shared bridges already execute locally.

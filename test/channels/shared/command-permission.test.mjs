@@ -6,7 +6,7 @@ import { evaluateInboundAccess } from '../../../src/channels/shared/inbound-acce
 
 test('isSharedLocalCommand matches existing local command families', () => {
   for (const command of [
-    '/help', '/status', '/new', '/version', '/stop', '/steer more',
+    '/help', '/status', '/new', '/start', '/version', '/stop', '/steer more',
     '/batch', '/send', '/cancel', '/history 3', '/workspace /tmp',
     '/workspacelist', '/sessionlist', '/sessions /tmp', '/session 2',
     '/compact', '/models', '/model 2', '/reasonings', '/reasoning high',

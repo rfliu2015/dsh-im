@@ -1155,6 +1155,17 @@ export class TextHarnessBridge {
         ].join('\n'));
         return;
       }
+      // Telegram's own START button sends /start, so this is the first screen a
+      // chat lands on. It answers "where am I" and then hands over the picker
+      // /ws already sends; a channel without a keyboard falls back to the text
+      // list #presentWorkspaceCommand declines to render.
+      // A Telegram deep link arrives as "/start <payload>". The payload is not
+      // ours to interpret, so it is ignored rather than reported as bad usage:
+      // the first screen must still appear.
+      if (!hasImages && !hasFiles && /^\/start(?:\s|$)/u.test(command)) {
+        await this.#runStartCommand(target, conversationKey);
+        return;
+      }
       if (!hasImages && !hasFiles && command === '/status') {
         await this.#harness.ensureRunning({ signal: this.#signal });
         await this.#bot.sendText(target, t('{label}机器人与 DeepSeek Harness 连接正常。', { label: this.#descriptor.label }));
@@ -1948,6 +1959,83 @@ export class TextHarnessBridge {
       // A failed submission rolls the question back, so let the user press again.
       if (this.#pendingInteractions.get(key) === pending) pending.callbackClaimed = false;
     });
+  }
+
+  /**
+   * The /start screen: what this conversation is bound to, then the workspace
+   * picker.
+   *
+   * The status is a message of its own on purpose. A picker card only ever
+   * rewrites its keyboard in place (see TELEGRAM_WORKSPACE_CARD), so a
+   * "current: …" sentence in the card body would go stale the instant a press
+   * switched the workspace. Nothing here is fatal: a workspace or title that
+   * cannot be read is reported in place, and the picker is still offered.
+   */
+  async #runStartCommand(target, conversationKey) {
+    const lines = [];
+    let workspace = null;
+    try {
+      const current = typeof this.#harness.currentConversationWorkspace === 'function'
+        ? this.#harness.currentConversationWorkspace(conversationKey)
+        : (typeof this.#harness.currentWorkspace === 'function'
+          ? this.#harness.currentWorkspace()
+          : null);
+      if (typeof current === 'string' && current) workspace = current;
+      if (workspace) {
+        lines.push(t('当前对话工作区：{workspace}', { workspace }));
+        // The same distinction /conv draws, so the two surfaces cannot disagree
+        // about whether a later change to the bot default reaches this chat.
+        if (typeof this.#harness.hasConversationWorkspaceOverride === 'function') {
+          lines.push(this.#harness.hasConversationWorkspaceOverride(conversationKey) === true
+            ? t('状态：已为该对话显式绑定，之后修改 bot 默认工作区不会影响本对话。')
+            : t('状态：未显式绑定，当前跟随 bot 默认工作区。'));
+        }
+      } else {
+        lines.push(t('当前机器人没有可用的工作区。'));
+      }
+    } catch {
+      lines.push(t('暂时无法读取当前工作区，请稍后重试。'));
+    }
+    try {
+      const sessionId = this.#state.sessionFor?.(conversationKey) ?? null;
+      if (typeof sessionId === 'string' && sessionId) {
+        lines.push(t('当前会话：{sessionId}', { sessionId }));
+        // The title is a second lookup and may be unavailable; a failed one
+        // must not cost the reader the id above, which is the part that binds.
+        let title = null;
+        try {
+          const listing = await workspaceSessionListing(this.#harness, { conversationKey });
+          // workspaceSessionListing reports a failed read as `error` instead of
+          // throwing, so a missing listing is checked explicitly: "unavailable"
+          // and "this Session has no title" are different things to the reader.
+          const match = !listing?.error && Array.isArray(listing?.sessions)
+            ? listing.sessions.find((item) => item?.sessionId === sessionId)
+            : null;
+          title = listing?.error || match?.summaryAvailable === false
+            ? t('标题暂不可用')
+            : cleanText(match?.title) || t('暂无标题');
+        } catch {
+          title = t('标题暂不可用');
+        }
+        lines.push(t('会话标题：{title}', { title }));
+      } else {
+        lines.push(t('当前会话：本聊天尚未绑定会话，下一条消息会新建一个。'));
+      }
+    } catch {
+      // A missing state store only costs the session lines, never the command.
+    }
+    lines.push('', t('下方按钮可切换工作区，选定后即可绑定该工作区的会话。'));
+    await this.#bot.sendText(target, lines.join('\n'));
+
+    const picker = await runWorkspaceCommand('/ws', this.#harness, conversationKey);
+    const presented = picker
+      ? await this.#presentWorkspaceCommand(target, picker, conversationKey)
+      : false;
+    if (!presented) {
+      for (const reply of picker?.messages ?? [picker?.message]) {
+        if (typeof reply === 'string') await this.#bot.sendText(target, reply);
+      }
+    }
   }
 
   /**

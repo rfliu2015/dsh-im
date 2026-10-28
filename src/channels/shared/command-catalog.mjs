@@ -29,6 +29,12 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
   // grouped remainder; every group stays contiguous so the menu reads as
   // sections. Aliases never take a menu slot: a second name for one command is
   // noise in a list a user scans by eye, and typing the alias still works.
+  // The first screen a chat lands on, and the one entry that is deliberately
+  // absent from the native menu: Telegram's own START button already sends
+  // /start, so a second menu row would only duplicate it.
+  defineCatalogCommand('start', '查看当前工作区与会话', [
+    '/start  查看当前工作区与会话，并给出切换按钮',
+  ], { menuVisible: false }),
   defineCatalogCommand('workspace', '查看或切换工作区', [
     '/workspace 或 /ws  查看可切换的工作区（点按钮切换）',
     '/workspace 工作区序号或绝对路径  切换工作区',
@@ -53,6 +59,11 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
   ], { aliases: [{ name: 'sessions', menuVisible: false }] }),
   defineCatalogCommand('models', '按序号列出所有可用模型', [
     '/models  按序号列出所有可用模型',
+  ]),
+  // Stopping is the control action reached for mid-answer, so it sits in the
+  // high-frequency block rather than with /steer in the group below.
+  defineCatalogCommand('stop', '停止当前任务', [
+    '/stop  停止当前任务',
   ]),
   defineCatalogCommand('compact', '压缩当前会话的较早上下文', [
     '/compact  压缩当前会话的较早上下文',
@@ -91,9 +102,7 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
     '/presetlist 或 /presets  按序号列出可用 Agent Preset',
   ], { aliases: [{ name: 'presets', menuVisible: false }] }),
   // Task control: act on the turn that is already running.
-  defineCatalogCommand('stop', '停止当前任务', [
-    '/stop  停止当前任务',
-  ]),
+  // /stop itself lives in the high-frequency block above.
   defineCatalogCommand('steer', '纠偏当前任务', [
     '/steer 补充指令  纠偏当前任务',
   ]),

@@ -8,6 +8,19 @@ export default {
   '开启一个全新会话': 'Start a brand-new Session',
   '压缩当前会话的较早上下文': 'Compact the earlier context of the current Session',
   '切换工作区': 'Switch Workspace',
+  // /start status screen: what this conversation is bound to, sent as a message
+  // of its own so the picker card below can stay state-free.
+  '查看当前工作区与会话': 'Show the current Workspace and Session',
+  '/start  查看当前工作区与会话，并给出切换按钮':
+    '/start  Show the current Workspace and Session, with buttons to switch',
+  '暂时无法读取当前工作区，请稍后重试。':
+    'Could not read the current Workspace right now. Try again later.',
+  '当前会话：{sessionId}': 'Current Session: {sessionId}',
+  '会话标题：{title}': 'Session title: {title}',
+  '当前会话：本聊天尚未绑定会话，下一条消息会新建一个。':
+    'Current Session: this chat is not bound to one yet; the next message will create it.',
+  '下方按钮可切换工作区，选定后即可绑定该工作区的会话。':
+    'The buttons below switch the Workspace; once there, you can bind one of its Sessions.',
   // /ws workspace picker card: one tap switches, the pressed card is re-marked in place.
   '选择要切换的工作区（共 {count} 个）：': 'Choose a Workspace to switch to ({count} total):',
   '这个列表已过期，请重新发送 /ws。': 'This list has expired. Send /ws again.',
