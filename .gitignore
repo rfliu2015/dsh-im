@@ -5,6 +5,9 @@ coverage/
 .env.*
 !.env.example
 *.tgz
+# Scratch file used to pass multi-line commit messages on Windows.
+_commitmsg*.txt
+_msg*.txt
 .DS_Store
 .idea/
 e2e/
