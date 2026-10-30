@@ -1409,6 +1409,7 @@ export class TelegramRuntime {
   #deliveryService = null;
   #settings = null;
   #dshHome = null;
+  #hostOrigin = null;
   #conversationQueue;
   /** Reasons already reported, so a broken recognizer logs once. */
   #voiceFailures = new Set();
@@ -1452,6 +1453,7 @@ export class TelegramRuntime {
     // write through a path they cannot read back.
     settings = null,
     dshHome = null,
+    hostOrigin = null,
     logger = console,
     replyTimeoutMs = 600_000,
     createApi = (options) => new TelegramApi(options),
@@ -1478,6 +1480,7 @@ export class TelegramRuntime {
     this.#deliveryService = deliveryService;
     this.#settings = settings;
     this.#dshHome = dshHome;
+    this.#hostOrigin = hostOrigin;
     this.#voiceTimeoutMs = voiceTimeoutMs;
     // Voice prep and delivery are serialised per conversation, never per poll.
     this.#conversationQueue = createConversationQueue({
@@ -1609,6 +1612,7 @@ export class TelegramRuntime {
         // External cards may rewrite one field of another plugin's settings.
         settings: this.#settings,
         dshHome: this.#dshHome,
+        hostOrigin: this.#hostOrigin,
         botId: this.#config?.botId,
         contextEnhancement: this.#contextEnhancement,
         accessPolicy: this.#accessPolicy,

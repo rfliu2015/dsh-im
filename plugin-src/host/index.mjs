@@ -40,12 +40,40 @@ export const inject = [
   'settings',
 ];
 
-function channelConfig(config, name, deliveryService) {
+/**
+ * The Host's own loopback origin, or null when the service exposes neither.
+ *
+ * `port` is a real number on this build (`getOrigin()` and a `port` getter are on
+ * the prototype). Both are tried because a future Host could drop either, and a
+ * wrong origin is worse than no origin: callers treat null as "ask somewhere
+ * else", while a guessed URL would be attempted and fail confusingly.
+ */
+function webServerOrigin(webServer) {
+  try {
+    if (!webServer) return null;
+    if (typeof webServer.getOrigin === 'function') {
+      const origin = webServer.getOrigin();
+      if (typeof origin === 'string' && origin) return origin.replace(/\/+$/u, '');
+    }
+    const port = webServer.port;
+    if (Number.isSafeInteger(port) && port > 0) return `http://127.0.0.1:${port}`;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function channelConfig(config, name, deliveryService, originRef) {
   const channel = { ...(config.dshHome ? { dshHome: config.dshHome } : {}), ...config[name] };
   const withAuthority = config.rpcAuthority === undefined
     ? channel
     : { ...channel, rpcAuthority: config.rpcAuthority };
-  return name === 'office' ? withAuthority : { ...withAuthority, deliveryService };
+  // A live getter, not a value: the channel asks when a command needs the origin
+  // rather than at start-up, so the answer survives either injection order.
+  const withOrigin = typeof originRef?.value !== 'undefined'
+    ? { ...withAuthority, hostOrigin: () => originRef.value }
+    : withAuthority;
+  return name === 'office' ? withOrigin : { ...withOrigin, deliveryService };
 }
 
 export function createImHostPlugin(internals = {}) {
@@ -94,6 +122,12 @@ export function createImHostPlugin(internals = {}) {
     name,
     inject,
     async apply(ctx, config = {}) {
+      // Mutable so the webServer injection can publish the origin after the
+      // channels have already been activated: the two injections are
+      // independent and nothing orders them. A command that runs before the
+      // origin is known simply finds no candidate, which is the same failure
+      // mode as before this existed.
+      const originRef = { value: null };
       const unavailableSessionSyncChannels = channels
         .map(([channel]) => channel)
         .filter((channel) => channel !== 'office'
@@ -121,7 +155,7 @@ export function createImHostPlugin(internals = {}) {
         }));
       }
       const activate = async (readyCtx) => {
-        await activateChannels(readyCtx, config, deliveryService);
+        await activateChannels(readyCtx, config, deliveryService, originRef);
       };
       if (typeof ctx?.inject === 'function') {
         await ctx.inject(
@@ -129,18 +163,24 @@ export function createImHostPlugin(internals = {}) {
           activate,
         );
         ctx.inject(['webServer'], (httpCtx) => {
+          // The origin the Host itself listens on, for channels that must call a
+          // sibling plugin's route. Read here so it is published before any
+          // command can run, and re-read lazily by the channel in case this
+          // injection resolves after activation.
+          originRef.value = webServerOrigin(httpCtx?.webServer);
           startDeliveryHttp(httpCtx, deliveryService);
         });
         return;
       }
       await activate(ctx);
       if (ctx?.webServer?.register && typeof ctx?.effect === 'function') {
+        originRef.value = webServerOrigin(ctx.webServer);
         startDeliveryHttp(ctx, deliveryService);
       }
     },
   });
 
-  async function activateChannels(ctx, config, deliveryService) {
+  async function activateChannels(ctx, config, deliveryService, originRef = { value: null }) {
     // Bind the bot message language before any channel connects, so the first
     // command menu a platform stores is already in the interface language.
     const hostLanguage = startHostLanguage(ctx, config);
@@ -209,7 +249,7 @@ export function createImHostPlugin(internals = {}) {
     // Start them together so a slow channel cannot leave later routes absent.
     await Promise.all(channels.map(async ([channel, start]) => {
       try {
-        await start(ctx, channelConfig(config, channel, deliveryService));
+        await start(ctx, channelConfig(config, channel, deliveryService, originRef));
       } catch (error) {
         failures.push(error);
         logger.error?.(`[dsh-im] failed to activate ${channel}; continuing with the remaining channels`, error);

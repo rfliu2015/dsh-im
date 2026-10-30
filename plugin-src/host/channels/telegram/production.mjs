@@ -29,6 +29,11 @@ export function createProductionController(ctx, config = {}, internals = {}) {
       // Resolve the declaration file from the Host's own configuration when it
       // sets one, so the bridge does not have to guess from the environment.
       ...(config.dshHome ? { dshHome: config.dshHome } : {}),
+      // The Host's own loopback origin. A card declared in `external-cards.json`
+      // calls a sibling plugin's route, and this is the only source that stays
+      // correct without that sibling: it is what the Host is actually listening
+      // on right now, not a port written down by a restart helper.
+      ...(typeof config.hostOrigin === 'function' ? { hostOrigin: config.hostOrigin } : {}),
     }),
     // Speech recognition is a Host service (@deepseek-ai/dsh-experimental-speech-to-text);
     // the channel only converts the attachment and forwards the transcript.

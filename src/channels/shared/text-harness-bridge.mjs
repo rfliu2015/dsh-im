@@ -114,6 +114,21 @@ const SESSION_CARD_NONCE_BYTES = 9;
  */
 const MAX_MODEL_CARDS = 50;
 const MODEL_CARD_TTL_MS = 10 * 60 * 1000;
+/**
+ * How long a declared card waits for ANY base-URL source to become available.
+ *
+ * Channels activate before the webServer injection runs (see
+ * `plugin-src/host/index.mjs`: `await ctx.inject([...], activate)` comes first,
+ * the webServer injection second), so a message that arrives in that gap finds
+ * no origin at all. The window is short — the service is already mounted, only
+ * the callback is pending — but a command sent from the restart notification
+ * lands right inside it, and "no Host address" reads as a broken plugin.
+ *
+ * Bounded, and only paid when the answer is still empty: a warm bridge resolves
+ * its first candidate immediately and never waits.
+ */
+const EXTERNAL_CARD_ORIGIN_WAIT_MS = 5_000;
+const EXTERNAL_CARD_ORIGIN_RETRY_MS = 250;
 
 const INTERACTION_RESOLVED_TEXT = '这个问题已在其他客户端处理，无需再次回答。';
 const FILE_ONLY_COMPLETION_TEXT = '任务已完成。';
@@ -264,6 +279,8 @@ export class TextHarnessBridge {
   #externalCards = [];
   #externalCardStates = new Map();
   #externalCardBaseUrlOption = null;
+  // A live getter for the origin the Host is listening on, when it publishes one.
+  #hostOrigin = null;
   #dshHome = null;
   // The Host settings service, when the caller supplies it. External cards may
   // declare a settings rewrite; without this they can only post literal bodies.
@@ -307,6 +324,7 @@ export class TextHarnessBridge {
      */
     externalCards = null,
     externalCardBaseUrl = null,
+    hostOrigin = null,
     dshHome: dshHomeOption = null,
     settings = null,
     deliveryService = null,
@@ -338,6 +356,7 @@ export class TextHarnessBridge {
     this.#externalCard = externalCard ?? null;
     this.#externalCards = Array.isArray(externalCards) ? externalCards : [];
     this.#externalCardBaseUrlOption = externalCardBaseUrl;
+    this.#hostOrigin = hostOrigin;
     // Set unconditionally: even a caller that supplies its own cards needs the
     // home directory to locate the recorded loopback ports.
     this.#dshHome = dshHomeOption
@@ -2583,20 +2602,35 @@ export class TextHarnessBridge {
    * candidate is therefore verified by actually calling the declared route.
    */
   async #runExternalCard(card, key) {
-    const candidates = await this.#externalCardBaseUrls();
-    if (candidates.length === 0) {
+    // Retried as a whole, not just the candidate list. A candidate that names a
+    // port which is not (yet) the Host's is not an empty list — the environment
+    // variable alone can supply one, and it points at whatever shell started DSH.
+    // So the condition to wait on is "no candidate produced the list", not "no
+    // candidate exists": at launch the truth is simply not knowable yet.
+    const deadline = Date.now() + EXTERNAL_CARD_ORIGIN_WAIT_MS;
+    let candidates = [];
+    let answer;
+    let errors = [];
+    for (;;) {
+      candidates = await this.#externalCardBaseUrlsOnce();
+      errors = [];
+      for (const baseUrl of candidates) {
+        const attempt = await fetchCardListing(card, { baseUrl, signal: this.#signal });
+        if (!attempt.error) {
+          answer = { ...attempt, baseUrl };
+          break;
+        }
+        errors.push(attempt.error);
+      }
+      if (answer || Date.now() >= deadline) break;
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, EXTERNAL_CARD_ORIGIN_RETRY_MS);
+        timer.unref?.();
+      });
+    }
+    if (!answer && candidates.length === 0) {
       const message = t('无法确定本地 Host 地址，暂时无法读取 {title}。', { title: card.title });
       return { handled: true, message, messages: [message] };
-    }
-    let answer;
-    const errors = [];
-    for (const baseUrl of candidates) {
-      const attempt = await fetchCardListing(card, { baseUrl, signal: this.#signal });
-      if (!attempt.error) {
-        answer = { ...attempt, baseUrl };
-        break;
-      }
-      errors.push(attempt.error);
     }
     if (!answer) {
       // Report the MOST INFORMATIVE failure, which is not the last one. Only the
@@ -2628,18 +2662,31 @@ export class TextHarnessBridge {
   /**
    * Ordered, de-duplicated base-URL candidates for a declared card.
    *
-   * An explicit value wins (a Host that knows its own origin can say so), then
-   * the environment, then whatever the restart helper recorded. Because each
+   * The Host's own origin comes first, then an explicit value, then the
+   * environment, then whatever the restart helper recorded. Because each
    * candidate is verified by use, a wrong ordering costs one refused connection
-   * rather than a broken command.
+   * rather than a broken command — which is why the caller may retry this.
    */
-  async #externalCardBaseUrls() {
+  async #externalCardBaseUrlsOnce() {
+    const list = [];
+    // FIRST: the origin the Host is actually listening on. A Host that publishes
+    // it makes every other source redundant, and this is the only one that stays
+    // correct when DSH is started without the restart helper that writes the
+    // port file below. Guarded: the getter reads a live Host service, and a
+    // throw there must cost one candidate, never the whole command.
+    let live;
+    try {
+      live = typeof this.#hostOrigin === 'function' ? this.#hostOrigin() : this.#hostOrigin;
+    } catch {
+      live = null;
+    }
+    if (typeof live === 'string' && live) list.push(live.replace(/\/+$/u, ''));
     const raw = typeof this.#externalCardBaseUrlOption === 'function'
       ? await this.#externalCardBaseUrlOption()
       : this.#externalCardBaseUrlOption;
-    const list = (Array.isArray(raw) ? raw : [raw])
-      .filter((entry) => typeof entry === 'string' && entry)
-      .map((entry) => entry.replace(/\/+$/u, ''));
+    for (const entry of (Array.isArray(raw) ? raw : [raw])) {
+      if (typeof entry === 'string' && entry) list.push(entry.replace(/\/+$/u, ''));
+    }
     const fromEnv = typeof process !== 'undefined' ? process.env?.DSH_WEB_URL : undefined;
     if (typeof fromEnv === 'string' && fromEnv) list.push(fromEnv.replace(/\/+$/u, ''));
     list.push(...await restartStateBaseUrls(this.#dshHome));
@@ -2764,7 +2811,7 @@ export class TextHarnessBridge {
       // The base URL that actually answered the list is the one a write must use
       // too: re-probing here could pick a different candidate and post the same
       // action to a port that is not the one the reader was looking at.
-      const baseUrl = entry.baseUrl ?? (await this.#externalCardBaseUrls())[0] ?? '';
+      const baseUrl = entry.baseUrl ?? (await this.#externalCardBaseUrlsOnce())[0] ?? '';
       const answer = await applyCardActions(entry.card, row, {
         baseUrl,
         signal: this.#signal,

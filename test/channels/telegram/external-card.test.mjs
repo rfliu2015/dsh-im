@@ -17,6 +17,69 @@ import {
   TELEGRAM_EXTERNAL_CARD,
   parseTelegramExternalCardCallback,
 } from '../../../src/channels/telegram/telegram-bridge.mjs';
+import { TextHarnessBridge } from '../../../src/channels/shared/text-harness-bridge.mjs';
+
+/**
+ * Run one external card end to end against an in-process server standing in for
+ * the sibling plugin. Used where the assertion is about how the bridge resolves
+ * its base URL, not about the declaration format.
+ */
+async function runExternalCard(command, options = {}) {
+  const { createServer } = await import('node:http');
+  // The server is the only listener, so a delivered card proves the base URL
+  // came from whichever source the test is exercising.
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      accounts: [{ id: 'a1', accountName: 'first', selected: true }],
+      pool: { enabled: false },
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  // A test that exercises the origin getter needs the real URL, which only
+  // exists once the server is listening.
+  options.__beforeDispatch?.(origin);
+  delete options.__beforeDispatch;
+  const cards = [];
+  const sent = [];
+  const bridge = new TextHarnessBridge({
+    descriptor: { key: 'telegram', label: 'Telegram', reactions: {} },
+    externalCard: TELEGRAM_EXTERNAL_CARD,
+    state: { hasSeen: () => false, async markSeen() {}, sessionFor: () => null },
+    bot: {
+      async sendText(_target, text) { sent.push(text); },
+      async sendInteractionCard(_target, card) {
+        cards.push(card);
+        return { providerMessageIds: ['1'] };
+      },
+      async updateInteractionCard() {},
+      async answerInteractionCallback() {},
+    },
+    harness: { currentWorkspace: () => '/w', async listWorkspaces() { return ['/w']; } },
+    logger: { warn() {}, info() {}, error() {} },
+    externalCards: [{
+      command,
+      title: 'Accounts',
+      list: {
+        url: '{base}/usage', items: 'accounts', id: 'id', label: 'accountName',
+        current: 'selected', note: '',
+      },
+      actions: [{ post: '{base}/save', body: {} }],
+    }],
+    ...options,
+  });
+  try {
+    await bridge.accept({
+      messageId: 'm1', senderId: 'a', senderIsBot: false, kind: 'direct',
+      conversationId: 'c', content: command, addressed: true, replyTarget: { chatId: 1 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  } finally {
+    server.close();
+  }
+  return { cards, sent, bridge, origin };
+}
 
 const SPEC = {
   version: 1,
@@ -354,3 +417,58 @@ test('an effect longer than the cap is truncated, not carried whole', () => {
   const { cards } = normalizeExternalCards(long);
   assert.ok(cards[0].actions[0].effect.length <= 200);
 });
+
+test('a Host-published origin is used when nothing else can reach the route', async () => {
+  // The helper's server is the only thing listening, so a delivered card proves
+  // the origin getter supplied the base URL: neither the environment nor the
+  // recorded restart ports point at it. The getter is read lazily by the bridge,
+  // so `origin` is populated by the time the command runs.
+  let origin = null;
+  const result = await runExternalCard('/wb', {
+    hostOrigin: () => origin,
+    // Published before the command is dispatched, still through the getter.
+    __beforeDispatch: (url) => { origin = url; },
+  });
+  assert.equal(result.cards.length, 1, 'the card was delivered through the origin getter');
+  assert.equal(result.sent.length, 0);
+});
+
+test('a throwing origin getter costs one candidate, never the command', async () => {
+  const { cards, sent } = await runExternalCard('/wb', {
+    hostOrigin: () => { throw new Error('the Host service is gone'); },
+  });
+  // No candidate can reach the stub, so the command reports a real failure —
+  // what matters is that it replies instead of throwing out of the handler.
+  assert.equal(cards.length, 0);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /接口不存在|无法读取/u);
+});
+
+test('an origin that appears late is still found, not reported as missing', async () => {
+  // Channels activate before the webServer injection publishes the origin, so a
+  // message arriving in that gap used to fail with "no Host address". The bridge
+  // now re-checks for a bounded while: the getter starts null and only becomes
+  // valid a few hundred ms in, which is the ordering this protects.
+  //
+  // dshHome points at an empty directory on purpose. The default resolves to the
+  // real ~/.dsh, whose restart-state.json carries live ports — a candidate list
+  // built from those is non-empty, so no retry happens and the test would be
+  // measuring this machine instead of the code.
+  const emptyHome = await mkdtemp(join(tmpdir(), 'external-card-wait-'));
+  let origin = null;
+  let retries = 0;
+  const result = await runExternalCard('/wb', {
+    dshHome: emptyHome,
+    hostOrigin: () => {
+      retries += 1;
+      return origin;
+    },
+    __beforeDispatch: (url) => {
+      setTimeout(() => { origin = url; }, 400);
+    },
+  });
+  assert.ok(retries > 1, 'the bridge retried instead of deciding on the first empty answer');
+  assert.equal(result.cards.length, 1, 'the card waited for the origin instead of giving up');
+  assert.equal(result.sent.length, 0);
+});
+
