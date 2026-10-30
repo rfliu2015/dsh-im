@@ -6488,6 +6488,51 @@ test('workspace titles flow through both cards, refreshes, and path-based dropdo
   ]);
 });
 
+test('isolated Feishu workspace listings retain all while bare workspace commands stay disabled', async (t) => {
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'dsh-isolated-workspace-list-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const isolated = join(root, 'conv-generated');
+  mkdirSync(isolated);
+  let enabled = true;
+  const sent = [];
+  const bridge = new FeishuHarnessBridge({
+    client: cardClient(async (message) => sent.push(message)),
+    channel: {},
+    harness: {
+      ...sessionsHarness(0),
+      currentWorkspace: () => root,
+      conversationDirectoryConfig: () => ({ enabled }),
+      conversationDirectoryPaths: () => [isolated],
+      listWorkspaces: async () => [root, isolated],
+    },
+    state: stateFixture().state,
+    status: bridgeStatus(),
+    allowedSenderOpenIds: new Set(['ou_owner']),
+  });
+  let input = 0;
+  const send = async (text) => {
+    await bridge.accept(event(`isolation-list-${++input}`, text, { senderOpenId: 'ou_owner' }));
+    await bridge.waitForIdle();
+  };
+  const listed = () => buttonsFromCard(sent.at(-1).content)
+    .map(callbackAction).filter((action) => action.startsWith('workspace:'));
+
+  await send('/ws');
+  await send('/workspace');
+  assert.equal(sent.length, 0);
+  await send('/workspacelist');
+  assert.deepEqual(listed(), [`workspace:${root}`]);
+  await send('/workspacelist all');
+  assert.deepEqual(listed(), [`workspace:${root}`, `workspace:${isolated}`]);
+  enabled = false;
+  for (const command of ['/ws', '/workspace']) {
+    const before = sent.length;
+    await send(command);
+    assert.equal(sent.length, before + 1);
+    assert.deepEqual(listed(), [`workspace:${root}`]);
+  }
+});
+
 test('menu optional Host data is bounded by the card data timeout', async () => {
   const fixture = stateFixture();
   const waitForAbort = ({ signal }) => new Promise((resolve, reject) => {
@@ -12879,7 +12924,7 @@ test('plain IM replies (stepPush off) register the in-flight turn and never open
 });
 
 // Topic deduplication must follow the real Harness session, not message parsing.
-function topicAnchorFixture({ mode = 'text', ...options } = {}) {
+function topicAnchorFixture({ mode = 'text', quotedFile = false, ...options } = {}) {
   const fixture = stateFixture();
   const asked = [];
   const reads = [];
@@ -12893,8 +12938,11 @@ function topicAnchorFixture({ mode = 'text', ...options } = {}) {
   client.im.v1.message.get = async (request) => {
     reads.push(request.path.message_id);
     return { code: 0, data: { items: [{
-      message_id: request.path.message_id, chat_id: 'oc_group', msg_type: 'text',
-      body: { content: JSON.stringify({ text: `REPORT:${request.path.message_id}` }) },
+      message_id: request.path.message_id, chat_id: 'oc_group',
+      msg_type: quotedFile ? 'file' : 'text',
+      body: { content: JSON.stringify(quotedFile
+        ? { file_key: 'quoted-file-key', file_name: 'quoted.txt' }
+        : { text: `REPORT:${request.path.message_id}` }) },
     }] } };
   };
   const harness = {
@@ -13063,6 +13111,27 @@ test('missing AI sessions and stale-workspace retries receive the topic anchor a
   };
   await f.send();
   assert.ok(hasAnchor(f.asked[2].text), 'replacement session must rebuild content with its anchor');
+});
+
+test('stale-workspace retries do not duplicate quoted files or current files', async () => {
+  const f = topicAnchorFixture({ quotedFile: true });
+  let stale = true;
+  const attemptFileCounts = [];
+  const ask = f.harness.ask;
+  f.harness.ask = async (...args) => {
+    attemptFileCounts.push(args[2]?.files?.length ?? 0);
+    assert.equal(attemptFileCounts.at(-1), 1, 'each attempt receives one quoted file');
+    if (stale) {
+      stale = false;
+      await f.state.clearSession('group:oc_group:thread:omt_anchor');
+      throw Object.assign(new Error('workspace moved'), { code: 'workspace-session-stale' });
+    }
+    return ask(...args);
+  };
+  await f.send();
+  assert.deepEqual(attemptFileCounts, [1, 1]);
+  assert.equal(f.asked.length, 1);
+  assert.equal(f.asked[0].options.files.length, 1);
 });
 
 test('topic anchors are isolated between bots and between topics', async () => {
