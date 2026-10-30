@@ -1407,6 +1407,8 @@ export class TelegramRuntime {
   #voice;
   #voiceTimeoutMs;
   #deliveryService = null;
+  #settings = null;
+  #dshHome = null;
   #conversationQueue;
   /** Reasons already reported, so a broken recognizer logs once. */
   #voiceFailures = new Set();
@@ -1445,6 +1447,11 @@ export class TelegramRuntime {
     // The Host delivery service owns per-target Session sync; /notify toggles
     // the same setting the settings page writes, so it needs this handle.
     deliveryService = null,
+    // A card declared in `external-cards.json` may rewrite one field of another
+    // plugin's settings section; null makes those actions refuse rather than
+    // write through a path they cannot read back.
+    settings = null,
+    dshHome = null,
     logger = console,
     replyTimeoutMs = 600_000,
     createApi = (options) => new TelegramApi(options),
@@ -1469,6 +1476,8 @@ export class TelegramRuntime {
     // null when this Host exposes no delivery service: /notify then reports
     // that Session sync is unavailable instead of pretending to succeed.
     this.#deliveryService = deliveryService;
+    this.#settings = settings;
+    this.#dshHome = dshHome;
     this.#voiceTimeoutMs = voiceTimeoutMs;
     // Voice prep and delivery are serialised per conversation, never per poll.
     this.#conversationQueue = createConversationQueue({
@@ -1597,6 +1606,9 @@ export class TelegramRuntime {
         state: this.#state,
         // /notify reads and writes the per-target Session sync through this.
         deliveryService: this.#deliveryService,
+        // External cards may rewrite one field of another plugin's settings.
+        settings: this.#settings,
+        dshHome: this.#dshHome,
         botId: this.#config?.botId,
         contextEnhancement: this.#contextEnhancement,
         accessPolicy: this.#accessPolicy,
@@ -1931,3 +1943,5 @@ export class TelegramRuntime {
     return this.status;
   }
 }
+
+

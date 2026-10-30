@@ -79,4 +79,29 @@ export default {
   '已关闭：只接收本聊天的问答结果。': 'Off: only this chat is received.',
   'Telegram机器人': 'Telegram Bot',
   ' Bot API 长轮询': ' Bot API long polling',
+  // /models rendered as a card. The two count/page shapes are separate keys
+  // rather than one composed string: the dictionaries are keyed by the exact
+  // literal a caller passes to t(), so a built-up key would never match.
+  '可用模型（共 {count} 个）：': 'Available models ({count} total):',
+  '可用模型（共 {count} 个，第 {page}/{pages} 页）：':
+    'Available models ({count} total, page {page}/{pages}):',
+  '这个模型列表已过期，请重新发送 /models。': 'This model list has expired. Send /models again.',
+  '正在切换模型，请稍候。': 'Switching the model, one moment.',
+  '已选择 {model}，正在切换。': 'Selected {model}, switching now.',
+  '暂时无法切换模型，请稍后重试。': 'Could not switch the model right now. Try again later.',
+  // A card declared in `external-cards.json`. The two title/count shapes are
+  // separate keys because the dictionaries are keyed by the exact literal.
+  '{title}（共 {count} 个）：': '{title} ({count} total):',
+  '{title}（共 {count} 个，第 {page}/{pages} 页）：': '{title} ({count} total, page {page}/{pages}):',
+  '这个列表已过期，请重新发送该命令。': 'This list has expired. Send the command again.',
+  '已选择 {label}，正在提交。': 'Selected {label}, submitting now.',
+  '正在提交，请稍候。': 'Submitting, one moment.',
+  '提交失败：{reason}': 'Submission failed: {reason}',
+  '已提交：{label}': 'Submitted: {label}',
+  '暂时无法提交，请稍后重试。': 'Could not submit right now. Try again later.',
+  '无法确定本地 Host 地址，暂时无法读取 {title}。':
+    'Cannot determine the local Host address, so {title} cannot be read right now.',
+  '无法读取 {title}：{reason}': 'Cannot read {title}: {reason}',
+  '{title}：接口不存在，对应的插件可能未安装。':
+    '{title}: that endpoint does not exist, so the plugin behind it is probably not installed.',
 };

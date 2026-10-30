@@ -17,11 +17,48 @@ const SESSION_BINDING_CHANGED = 'session-binding-changed';
 const MODEL_SELECTION_MISMATCH = 'model-selection-mismatch';
 const UNSAFE_DISPLAY_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 
-function commandResult(message) {
+function commandResult(message, extra = {}) {
   return {
     handled: true,
     message,
     messages: splitWorkspaceCommandMessage(message),
+    ...extra,
+  };
+}
+
+/**
+ * The `/models` catalog as data, for a channel that renders it as buttons.
+ *
+ * `items[].index` IS the number `/model <n>` accepts: both walk
+ * `catalog.groups` then each group's `models` in the same order, which is also
+ * the order `formatCatalog` prints. A card row and a typed command therefore
+ * cannot name different models — the same guarantee the session listing gives
+ * its own indices.
+ *
+ * `modelListing`, not `listing`: the workspace and session listings already use
+ * that key, and one generic name would let a channel's model hook claim a
+ * session list.
+ */
+function catalogListing(catalog) {
+  const items = [];
+  for (const group of catalog.groups) {
+    for (const model of group.models) {
+      items.push({
+        index: items.length + 1,
+        id: modelId(group.id, model.id),
+        provider: group.id,
+        model: model.id,
+      });
+    }
+  }
+  return {
+    current: catalog.current
+      ? modelId(catalog.current.provider, catalog.current.model)
+      : null,
+    items,
+    failures: catalog.failures.map(
+      (failure) => safeDisplayText(failure.name) || safeDisplayText(failure.id),
+    ),
   };
 }
 
@@ -530,7 +567,7 @@ export async function runModelCommand(text, harness, state, key, options = {}) {
       const catalog = bound
         ? await sessionCatalog(bound.session, requestOptions)
         : await listCatalog(harness, requestOptions);
-      return commandResult(formatCatalog(catalog));
+      return commandResult(formatCatalog(catalog), { modelListing: catalogListing(catalog) });
     } catch (error) {
       return commandResult(modelErrorMessage(error, 'list'));
     }

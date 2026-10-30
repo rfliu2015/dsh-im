@@ -22,6 +22,13 @@ export function createProductionController(ctx, config = {}, internals = {}) {
     // so the Host's delivery service has to reach the channel runtime.
     runtimeOptions: (config) => ({
       ...(config.deliveryService ? { deliveryService: config.deliveryService } : {}),
+      // A card declared in `external-cards.json` may rewrite one field of
+      // another plugin's settings section. The bridge refuses that action when
+      // this is missing, rather than writing through a path it cannot read back.
+      ...(typeof ctx?.get === 'function' && ctx.get('settings') ? { settings: ctx.get('settings') } : {}),
+      // Resolve the declaration file from the Host's own configuration when it
+      // sets one, so the bridge does not have to guess from the environment.
+      ...(config.dshHome ? { dshHome: config.dshHome } : {}),
     }),
     // Speech recognition is a Host service (@deepseek-ai/dsh-experimental-speech-to-text);
     // the channel only converts the attachment and forwards the transcript.

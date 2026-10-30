@@ -33,6 +33,11 @@ export const inject = [
   'connection',
   'credentials',
   'typertGateway',
+  // A card declared in `external-cards.json` may rewrite one field of another
+  // plugin's settings section, and the only safe way to do that is to read the
+  // live value back first. Without this injection the channel receives no
+  // settings service and those actions refuse rather than write.
+  'settings',
 ];
 
 function channelConfig(config, name, deliveryService) {

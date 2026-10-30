@@ -1,5 +1,7 @@
 import { BusyMessageDispatcher, canAutomaticallySteer } from './busy-message-dispatcher.mjs';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from './deferred-delivery-coordinator.mjs';
 import { t } from './i18n.mjs';
@@ -39,6 +41,13 @@ import {
   isPresetCommand,
   runPresetCommand,
 } from './preset-command.mjs';
+import {
+  applyCardActions,
+  externalCardFor,
+  fetchCardListing,
+  loadExternalCards,
+  restartStateBaseUrls,
+} from './external-card-command.mjs';
 import { askInWorkspaceSession } from './workspace-session.mjs';
 import { HarnessApprovalQueue, harnessApprovalDecision } from './harness-approval.mjs';
 import {
@@ -96,6 +105,15 @@ const WORKSPACE_CARD_NONCE_BYTES = 9;
 const MAX_SESSION_CARDS = 50;
 const SESSION_CARD_TTL_MS = 60 * 60 * 1000;
 const SESSION_CARD_NONCE_BYTES = 9;
+/**
+ * Cap and TTL for the model-card snapshots. A model id cannot ride in
+ * `callback_data`, so a press names the catalogue position and the snapshot
+ * says which model that position was when the card was sent — the same rule the
+ * session card follows, and the reason a stale card cannot switch to a model a
+ * refreshed catalogue no longer offers.
+ */
+const MAX_MODEL_CARDS = 50;
+const MODEL_CARD_TTL_MS = 10 * 60 * 1000;
 
 const INTERACTION_RESOLVED_TEXT = '这个问题已在其他客户端处理，无需再次回答。';
 const FILE_ONLY_COMPLETION_TEXT = '任务已完成。';
@@ -226,6 +244,8 @@ export class TextHarnessBridge {
   #interactionCard;
   #workspaceCard;
   #sessionCard;
+  #modelCard;
+  #externalCard;
   // /notify reads and writes the per-target Session sync this service owns.
   #deliveryService;
   #botId;
@@ -237,6 +257,17 @@ export class TextHarnessBridge {
   #sessionCards = new Map();
   // Conversation key → the one session card that is still authoritative there.
   #sessionCardKeys = new Map();
+  // Model-card snapshots by nonce: a model id cannot ride in callback_data either.
+  #modelCards = new Map();
+  // User-declared external cards (`external-cards.json`), and the snapshot
+  // cache behind their presses.
+  #externalCards = [];
+  #externalCardStates = new Map();
+  #externalCardBaseUrlOption = null;
+  #dshHome = null;
+  // The Host settings service, when the caller supplies it. External cards may
+  // declare a settings rewrite; without this they can only post literal bodies.
+  #settings = null;
   #contextHooks = null;
   // Delivery attempts per message id. A failed turn releases its `markSeen` so
   // the next poll can retry, and this counter is what keeps that from becoming
@@ -266,6 +297,18 @@ export class TextHarnessBridge {
     interactionCard = null,
     workspaceCard = null,
     sessionCard = null,
+    modelCard = null,
+    externalCard = null,
+    /**
+     * `null` means "read `$DSH_HOME/external-cards.json`". An ARRAY means the
+     * caller already decided, including "none". The two must not share a default:
+     * defaulting this to `[]` made "Host passed nothing" and "Host passed no
+     * cards" the same value, and the file was then never read at all.
+     */
+    externalCards = null,
+    externalCardBaseUrl = null,
+    dshHome: dshHomeOption = null,
+    settings = null,
     deliveryService = null,
     botId = null,
     contextHooks = null,
@@ -291,6 +334,34 @@ export class TextHarnessBridge {
     this.#interactionCard = interactionCard ?? null;
     this.#workspaceCard = workspaceCard ?? null;
     this.#sessionCard = sessionCard ?? null;
+    this.#modelCard = modelCard ?? null;
+    this.#externalCard = externalCard ?? null;
+    this.#externalCards = Array.isArray(externalCards) ? externalCards : [];
+    this.#externalCardBaseUrlOption = externalCardBaseUrl;
+    // Set unconditionally: even a caller that supplies its own cards needs the
+    // home directory to locate the recorded loopback ports.
+    this.#dshHome = dshHomeOption
+      ?? (typeof process !== 'undefined' ? process.env?.DSH_HOME : undefined)
+      ?? join(homedir(), '.dsh');
+    if (!Array.isArray(externalCards)) {
+      // Same three-step resolution the rest of this package uses
+      // (`default-workspace.mjs`, `image-input-settings-store.mjs`): a Host that
+      // does not export DSH_HOME to the plugin process is the common case, and
+      // reading the variable alone silently found no file at all.
+      loadExternalCards(this.#dshHome).then((loaded) => {
+        if (loaded.error) {
+          this.#logger.warn?.(`[dsh-im:${this.#descriptor.key}] ${loaded.error}`);
+          return;
+        }
+        if (loaded.cards.length === 0) return;
+        this.#externalCards = loaded.cards;
+        this.#logger.info?.(
+          `[dsh-im:${this.#descriptor.key}] external cards: `
+          + loaded.cards.map((card) => card.command).join(', '),
+        );
+      }).catch(() => undefined);
+    }
+    this.#settings = settings ?? null;
     this.#deliveryService = deliveryService ?? null;
     this.#botId = typeof botId === 'string' && botId ? botId : null;
     // Opt-in follow-up lanes for channels whose groups run on rapid consecutive
@@ -476,13 +547,24 @@ export class TextHarnessBridge {
     }
     const collectingBatch = normalized.kind === 'direct'
       && this.#batches.status(key).phase === 'collecting';
+    // A declaratively configured external card (`external-cards.json`) claims
+    // its own command. Deliberately the LAST matcher: those cards are user data,
+    // and one whose command collides with a built-in must lose to the built-in
+    // rather than shadow it.
+    const externalCard = collectingBatch || hasInboundFiles(normalized)
+      ? undefined
+      : externalCardFor(text, this.#externalCards);
     const commandRunner = collectingBatch ? null : isClearCommand(text) ? runClearCommand
       : isHistoryCommand(text) ? runHistoryCommand
       : hasInboundFiles(normalized) ? null : isControlCommand(text)
       ? runControlCommand
       : (isModelCommand(text)
           ? runModelCommand
-          : (isPresetCommand(text) ? runPresetCommand : null));
+          : (isPresetCommand(text)
+            ? runPresetCommand
+            : (externalCard === undefined
+              ? null
+              : () => this.#runExternalCard(externalCard, key))));
     if (commandRunner && (normalized.kind !== 'group' || normalized.addressed === true)) {
       let task;
       task = this.#processFastCommand(
@@ -1033,6 +1115,18 @@ export class TextHarnessBridge {
       // A command that echoes stored message bodies asks for markdown; a
       // channel without a rich sender ignores the option and stays plain.
       const format = result?.format === 'markdown' ? { format: 'markdown' } : {};
+      // /models carries the same numbered catalog the text list prints, so a
+      // channel with a model picker renders it as buttons. The text list is the
+      // single fallback: it is what every other channel already shows, and what
+      // this one shows when the card cannot be sent.
+      if (await this.#presentModelListingCommand(target, key, result)) {
+        this.#status.lastError = null;
+        return;
+      }
+      if (await this.#presentExternalCardCommand(target, result)) {
+        this.#status.lastError = null;
+        return;
+      }
       for (const reply of result?.messages ?? [result?.message]) {
         if (reply) await this.#bot.sendText(target, reply, format);
       }
@@ -1895,6 +1989,10 @@ export class TextHarnessBridge {
     if (workspacePress) return this.#handleWorkspaceCardPress(callback, key, workspacePress);
     const sessionPress = this.#sessionCard?.parse?.(callback.data) ?? null;
     if (sessionPress) return this.#handleSessionCardPress(callback, key, sessionPress);
+    const modelPress = this.#modelCard?.parse?.(callback.data) ?? null;
+    if (modelPress) return this.#handleModelCardPress(callback, key, modelPress);
+    const externalPress = this.#externalCard?.parse?.(callback.data) ?? null;
+    if (externalPress) return this.#handleExternalCardPress(callback, key, externalPress);
     const pending = this.#pendingInteractions.get(key);
     const notice = (text) => this.#answerInteractionCallback(callback, text);
     if (!pending) return notice(t('该问题已处理，无需再次选择。'));
@@ -2333,6 +2431,399 @@ export class TextHarnessBridge {
       const oldest = this.#sessionCards.keys().next().value;
       if (oldest === undefined) break;
       this.#sessionCards.delete(oldest);
+    }
+  }
+
+  /**
+   * Present a command's own model catalogue as a card, when the channel has a
+   * model picker. Returns false so the caller keeps the text list.
+   *
+   * Its own keys are `modelListing`, never `listing`: the workspace and session
+   * listings already own that name, and a shared key would let one card claim
+   * the other's snapshot.
+   */
+  async #presentModelListingCommand(target, conversationKey, command) {
+    const listing = command?.modelListing;
+    if (!listing || !Array.isArray(listing.items) || listing.items.length === 0) return false;
+    if (typeof this.#modelCard?.render !== 'function'
+      || typeof this.#bot.sendInteractionCard !== 'function') return false;
+    const nonce = randomBytes(SESSION_CARD_NONCE_BYTES).toString('base64url');
+    const card = this.#modelCard.render(listing, { nonce, page: 0 });
+    if (!card) return false;
+    const entry = {
+      listing,
+      key: conversationKey,
+      target,
+      page: card.page,
+      createdAt: Date.now(),
+      submitting: false,
+    };
+    this.#rememberModelCard(nonce, entry);
+    try {
+      const sent = await this.#bot.sendInteractionCard(target, card);
+      entry.messageId = Array.isArray(sent?.providerMessageIds) && sent.providerMessageIds.length > 0
+        ? String(sent.providerMessageIds[0])
+        : undefined;
+      return true;
+    } catch (error) {
+      // The snapshot is gone with the card, so the text list is the only way
+      // left to read this catalogue — and the caller still has it.
+      this.#modelCards.delete(nonce);
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to send the model card; `
+        + 'falling back to the text list:',
+        error?.message ?? error,
+      );
+      return false;
+    }
+  }
+
+  #rememberModelCard(nonce, entry) {
+    const now = Date.now();
+    for (const [key, stored] of this.#modelCards) {
+      if (now - stored.createdAt > MODEL_CARD_TTL_MS) this.#modelCards.delete(key);
+    }
+    this.#modelCards.set(nonce, entry);
+    while (this.#modelCards.size > MAX_MODEL_CARDS) {
+      const oldest = this.#modelCards.keys().next().value;
+      if (oldest === undefined) break;
+      this.#modelCards.delete(oldest);
+    }
+  }
+
+  /**
+   * Answer a model-card press through the snapshot it was sent from.
+   *
+   * The press carries a catalogue position, and `/model <n>` accepts the same
+   * number, so this replays the press as that command text rather than
+   * re-implementing the switch: one validated path, and a button that cannot
+   * behave differently from the command it mirrors.
+   */
+  async #handleModelCardPress(callback, key, press) {
+    if (this.#signal?.aborted) return;
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    const expired = t('这个模型列表已过期，请重新发送 /models。');
+    const entry = this.#modelCards.get(press.nonce);
+    if (!entry || entry.key !== key || Date.now() - entry.createdAt > MODEL_CARD_TTL_MS) {
+      if (entry && entry.key === key) {
+        this.#modelCards.delete(press.nonce);
+        await this.#retireCardKeyboard(
+          callback.replyTarget ?? entry.target,
+          String(callback.providerMessageId),
+          press.nonce,
+        );
+      }
+      return notice(expired);
+    }
+    // A model button switches the Session's model, which is exactly what
+    // `/model` does, so it must pass the same command-permission gate: a
+    // keyboard cannot bypass it.
+    const decision = evaluateInboundAccess(this.#accessPolicy, {
+      conversationType: callback.kind === 'group' ? 'group' : 'direct',
+      senderIds: [cleanText(callback.senderId)].filter(Boolean),
+      isCommand: true,
+    });
+    if (!decision.allowed) return notice(t(COMMAND_PERMISSION_DENIED_MESSAGE));
+    const target = callback.replyTarget ?? entry.target;
+    if (press.action === 'p') return this.#modelCardPage(callback, entry, press);
+    const item = Number.isSafeInteger(press.index)
+      ? entry.listing.items.find((candidate) => candidate.index === press.index)
+      : undefined;
+    if (!item) return notice(expired);
+    // Claim synchronously, before the first await: a second press arriving
+    // while the switch is in flight must not switch twice.
+    if (entry.submitting) return notice(t('正在切换模型，请稍候。'));
+    entry.submitting = true;
+    try {
+      // Clear the spinner before awaiting the switch: the acknowledgement is
+      // what makes the button stop looking pressed, and the switch itself is a
+      // real RPC round-trip the reader should not have to watch a spinner for.
+      await notice(t('已选择 {model}，正在切换。', { model: item.id }));
+      const result = await runModelCommand(
+        `/model ${item.index}`,
+        this.#harness,
+        this.#state,
+        key,
+        {
+          signal: this.#signal,
+          pendingInteraction: this.#pendingInteractions.has(key)
+            || this.#approvals.hasPending(key),
+          control: { owner: this, key },
+        },
+      );
+      // The card did its job for this press: drop the snapshot and retire the
+      // keyboard whether the switch succeeded or not. `/model` already reports
+      // the outcome in its own words, and a press that leaves the keyboard up
+      // invites a second switch the reader did not ask for. A refusal therefore
+      // reaches the reader exactly as a typed `/model <n>` would.
+      this.#modelCards.delete(press.nonce);
+      await this.#retireCardKeyboard(target, String(callback.providerMessageId), press.nonce);
+      for (const reply of result?.messages ?? [result?.message]) {
+        if (reply) await this.#bot.sendText(target, reply);
+      }
+      return undefined;
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to switch the model from a card:`,
+        error?.message ?? error,
+      );
+      return notice(t('暂时无法切换模型，请稍后重试。'));
+    } finally {
+      entry.submitting = false;
+    }
+  }
+
+  /**
+   * Run one user-declared external card.
+   *
+   * The loopback base URL is DISCOVERED, not configured: the Host never exports
+   * its listening port to plugin code (not in argv, and `DSH_WEB_URL` exists
+   * only in the shells DSH spawns), and the port changes on every restart, so a
+   * URL baked into the declaration would be stale by the next launch. Every
+   * candidate is therefore verified by actually calling the declared route.
+   */
+  async #runExternalCard(card, key) {
+    const candidates = await this.#externalCardBaseUrls();
+    if (candidates.length === 0) {
+      const message = t('无法确定本地 Host 地址，暂时无法读取 {title}。', { title: card.title });
+      return { handled: true, message, messages: [message] };
+    }
+    let answer;
+    const errors = [];
+    for (const baseUrl of candidates) {
+      const attempt = await fetchCardListing(card, { baseUrl, signal: this.#signal });
+      if (!attempt.error) {
+        answer = { ...attempt, baseUrl };
+        break;
+      }
+      errors.push(attempt.error);
+    }
+    if (!answer) {
+      // Report the MOST INFORMATIVE failure, which is not the last one. Only the
+      // first recorded port serves `/plugins/…`; the others answer 401 to
+      // anything, so "the last error" used to blame authorization for what is
+      // really a missing route. A 404 means the Host answered and the route is
+      // not there — that is the answer the reader needs.
+      const reason = errors.find((error) => /HTTP 404/u.test(error)) ?? errors[0] ?? '';
+      const message = /HTTP 404/u.test(reason)
+        ? t('{title}：接口不存在，对应的插件可能未安装。', { title: card.title })
+        : t('无法读取 {title}：{reason}', { title: card.title, reason });
+      return { handled: true, message, messages: [message] };
+    }
+    const listing = answer.listing;
+    const lines = [t('{title}（共 {count} 个）：', { title: card.title, count: listing.rows.length })];
+    if (listing.note) lines.push(listing.note);
+    for (const row of listing.rows) {
+      lines.push(`${row.index}. ${row.label}${row.current ? t('（当前）') : ''}`);
+    }
+    const message = lines.join('\n');
+    return {
+      handled: true,
+      message,
+      messages: [message],
+      externalListing: { card, listing, conversationKey: key, baseUrl: answer.baseUrl },
+    };
+  }
+
+  /**
+   * Ordered, de-duplicated base-URL candidates for a declared card.
+   *
+   * An explicit value wins (a Host that knows its own origin can say so), then
+   * the environment, then whatever the restart helper recorded. Because each
+   * candidate is verified by use, a wrong ordering costs one refused connection
+   * rather than a broken command.
+   */
+  async #externalCardBaseUrls() {
+    const raw = typeof this.#externalCardBaseUrlOption === 'function'
+      ? await this.#externalCardBaseUrlOption()
+      : this.#externalCardBaseUrlOption;
+    const list = (Array.isArray(raw) ? raw : [raw])
+      .filter((entry) => typeof entry === 'string' && entry)
+      .map((entry) => entry.replace(/\/+$/u, ''));
+    const fromEnv = typeof process !== 'undefined' ? process.env?.DSH_WEB_URL : undefined;
+    if (typeof fromEnv === 'string' && fromEnv) list.push(fromEnv.replace(/\/+$/u, ''));
+    list.push(...await restartStateBaseUrls(this.#dshHome));
+    return [...new Set(list)];
+  }
+
+  /** Render, remember and deliver one external card; false means "use text". */
+  async #presentExternalCardCommand(target, command) {
+    const payload = command?.externalListing;
+    if (!payload || !Array.isArray(payload.listing?.rows)) return false;
+    if (payload.listing.rows.length === 0) return false;
+    if (typeof this.#externalCard?.render !== 'function'
+      || typeof this.#bot.sendInteractionCard !== 'function') return false;
+    const nonce = randomBytes(SESSION_CARD_NONCE_BYTES).toString('base64url');
+    const card = this.#externalCard.render(payload.listing, {
+      nonce,
+      page: 0,
+      actionLabel: payload.card.actions.length > 0
+        ? (this.#externalCard.actionLabel ?? '')
+        : '',
+    });
+    if (!card) return false;
+    const entry = {
+      card: payload.card,
+      rows: payload.listing.rows,
+      key: payload.conversationKey,
+      target,
+      page: card.page,
+      createdAt: Date.now(),
+      submitting: false,
+      // The port that answered this list; the write must go back to the same one.
+      baseUrl: payload.baseUrl,
+    };
+    this.#rememberExternalCard(nonce, entry);
+    try {
+      const sent = await this.#bot.sendInteractionCard(target, card);
+      entry.messageId = Array.isArray(sent?.providerMessageIds) && sent.providerMessageIds.length > 0
+        ? String(sent.providerMessageIds[0])
+        : undefined;
+      return true;
+    } catch (error) {
+      this.#externalCardStates.delete(nonce);
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to send an external card; `
+        + 'falling back to the text list:',
+        error?.message ?? error,
+      );
+      return false;
+    }
+  }
+
+  #rememberExternalCard(nonce, entry) {
+    const now = Date.now();
+    for (const [key, stored] of this.#externalCardStates) {
+      if (now - stored.createdAt > MODEL_CARD_TTL_MS) this.#externalCardStates.delete(key);
+    }
+    this.#externalCardStates.set(nonce, entry);
+    while (this.#externalCardStates.size > MAX_MODEL_CARDS) {
+      const oldest = this.#externalCardStates.keys().next().value;
+      if (oldest === undefined) break;
+      this.#externalCardStates.delete(oldest);
+    }
+  }
+
+  /**
+   * Answer an external-card press: page locally, or apply the card's actions in
+   * order and report the first failure without pretending the rest ran.
+   */
+  async #handleExternalCardPress(callback, key, press) {
+    if (this.#signal?.aborted) return;
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    const expired = t('这个列表已过期，请重新发送该命令。');
+    const entry = this.#externalCardStates.get(press.nonce);
+    if (!entry || entry.key !== key || Date.now() - entry.createdAt > MODEL_CARD_TTL_MS) {
+      if (entry && entry.key === key) {
+        this.#externalCardStates.delete(press.nonce);
+        await this.#retireCardKeyboard(
+          callback.replyTarget ?? entry.target,
+          String(callback.providerMessageId),
+          press.nonce,
+        );
+      }
+      return notice(expired);
+    }
+    const decision = evaluateInboundAccess(this.#accessPolicy, {
+      conversationType: callback.kind === 'group' ? 'group' : 'direct',
+      senderIds: [cleanText(callback.senderId)].filter(Boolean),
+      isCommand: true,
+    });
+    if (!decision.allowed) return notice(t(COMMAND_PERMISSION_DENIED_MESSAGE));
+    const target = callback.replyTarget ?? entry.target;
+    if (press.action === 'p') {
+      if (typeof this.#bot.updateInteractionCard !== 'function') return notice(expired);
+      const page = press.index ?? 0;
+      if (page === entry.page) return notice(t('已经是这一页了。'));
+      const card = this.#externalCard.render({ title: entry.card.title, rows: entry.rows }, {
+        nonce: press.nonce, page, actionLabel: this.#externalCard.actionLabel ?? '',
+      });
+      if (!card) return notice(expired);
+      try {
+        await this.#bot.updateInteractionCard(target, String(callback.providerMessageId), {
+          markup: card.markup, text: card.text,
+        });
+        entry.page = card.page;
+        return notice(t('第 {page}/{pages} 页。', { page: card.page + 1, pages: card.pages }));
+      } catch (error) {
+        this.#logger.warn?.(
+          `[dsh-im:${this.#descriptor.key}] unable to turn an external card page:`,
+          error?.message ?? error,
+        );
+        return notice(t('暂时无法翻页，请稍后重试。'));
+      }
+    }
+    const row = Number.isSafeInteger(press.index)
+      ? entry.rows.find((candidate) => candidate.index === press.index)
+      : undefined;
+    if (!row) return notice(expired);
+    if (entry.submitting) return notice(t('正在提交，请稍候。'));
+    entry.submitting = true;
+    try {
+      await notice(t('已选择 {label}，正在提交。', { label: row.label }));
+      // The base URL that actually answered the list is the one a write must use
+      // too: re-probing here could pick a different candidate and post the same
+      // action to a port that is not the one the reader was looking at.
+      const baseUrl = entry.baseUrl ?? (await this.#externalCardBaseUrls())[0] ?? '';
+      const answer = await applyCardActions(entry.card, row, {
+        baseUrl,
+        signal: this.#signal,
+        settings: this.#settings,
+      });
+      if (answer.error) {
+        // Nothing is retired on a failure: the same card is still the list the
+        // reader is looking at, and re-sending the command would lose their page
+        // for a write that did not happen.
+        const message = t('提交失败：{reason}', { reason: answer.error });
+        await this.#bot.sendText(target, message);
+        return undefined;
+      }
+      this.#externalCardStates.delete(press.nonce);
+      await this.#retireCardKeyboard(target, String(callback.providerMessageId), press.nonce);
+      // The receipt carries every side effect the declaration reported. A card
+      // action that turns something else off must say so here: the reader has no
+      // other way to learn it, and the card itself is gone by the time they read
+      // this.
+      const effects = Array.isArray(answer.effects) ? answer.effects.filter(Boolean) : [];
+      const receipt = [t('已提交：{label}', { label: row.label }), ...effects].join('\n');
+      await this.#bot.sendText(target, receipt);
+      return undefined;
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to apply an external card action:`,
+        error?.message ?? error,
+      );
+      await this.#bot.sendText(target, t('暂时无法提交，请稍后重试。')).catch(() => undefined);
+      return undefined;
+    } finally {
+      entry.submitting = false;
+    }
+  }
+
+  /** Replace body and keyboard together so the page number cannot disagree. */
+  async #modelCardPage(callback, entry, press) {
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    if (typeof this.#bot.updateInteractionCard !== 'function') {
+      return notice(t('这个模型列表已过期，请重新发送 /models。'));
+    }
+    const page = press.index ?? 0;
+    if (page === entry.page) return notice(t('已经是这一页了。'));
+    const card = this.#modelCard.render(entry.listing, { nonce: press.nonce, page });
+    if (!card) return notice(t('这个模型列表已过期，请重新发送 /models。'));
+    try {
+      await this.#bot.updateInteractionCard(
+        callback.replyTarget ?? entry.target,
+        String(callback.providerMessageId),
+        { markup: card.markup, text: card.text },
+      );
+      entry.page = card.page;
+      return notice(t('第 {page}/{pages} 页。', { page: card.page + 1, pages: card.pages }));
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to turn the model card page:`,
+        error?.message ?? error,
+      );
+      return notice(t('暂时无法翻页，请稍后重试。'));
     }
   }
 

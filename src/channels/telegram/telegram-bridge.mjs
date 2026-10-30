@@ -244,6 +244,176 @@ export const TELEGRAM_SESSION_CARD = Object.freeze({
   parse: parseTelegramSessionCallback,
 });
 
+/**
+ * Models one card page carries. Same eight-row ceiling as the session card and
+ * for the same reason — a keyboard taller than a phone screen is a scroll, not
+ * a list — but its own constant: the two pages have no reason to move together.
+ */
+const MAX_MODEL_BUTTONS = 8;
+
+/**
+ * Encode one model-card press.
+ *
+ * A model id cannot ride in `callback_data` (64-byte budget) and is not stable
+ * across catalog refreshes, so a press carries the presentation nonce plus the
+ * index of that model in the `modelListing` snapshot the bridge cached when it
+ * sent the card. The index IS the number `/model <n>` accepts — both walk the
+ * catalog in the same order — so a button and a typed command cannot name
+ * different models.
+ */
+function modelCardCallbackData(nonce, action, argument) {
+  const payload = `m1|${nonce}|${action}`;
+  return argument === undefined ? payload : `${payload}|${argument}`;
+}
+
+/**
+ * Parse a press produced by {@link modelCardCallbackData}; null for foreign
+ * payloads. Actions: `s` switch to an indexed model, `p` show another page.
+ */
+export function parseTelegramModelCallback(data) {
+  const match = typeof data === 'string'
+    ? /^m1\|([A-Za-z0-9_-]{1,16})\|([sp])(?:\|(\d{1,4}))?$/u.exec(data)
+    : null;
+  if (!match) return null;
+  return {
+    nonce: match[1],
+    action: match[2],
+    ...(match[3] === undefined ? {} : { index: Number(match[3]) }),
+  };
+}
+
+/**
+ * Inline-keyboard presentation of `/models`.
+ *
+ * Same shape as the session card on purpose: one row per model, a pager, and a
+ * body that states the count so a press does not have to be tried to learn how
+ * many pages there are. The current model is marked in the row label rather
+ * than removed, because its position is what `/model <n>` still resolves — a
+ * gap in the numbering would make the printed list and the buttons disagree.
+ */
+export const TELEGRAM_MODEL_CARD = Object.freeze({
+  render(listing, { nonce, page = 0 } = {}) {
+    if (typeof nonce !== 'string' || !nonce) return null;
+    if (!Array.isArray(listing?.items)) return null;
+    const items = listing.items;
+    const pages = Math.max(1, Math.ceil(items.length / MAX_MODEL_BUTTONS));
+    const current = Number.isSafeInteger(page) && page >= 0 && page < pages ? page : 0;
+    const start = current * MAX_MODEL_BUTTONS;
+    const currentId = typeof listing.current === 'string' ? listing.current : null;
+    const keyboard = [];
+    for (const item of items.slice(start, start + MAX_MODEL_BUTTONS)) {
+      const isCurrent = currentId !== null && item.id === currentId;
+      keyboard.push([{
+        text: `${isCurrent ? '✓ ' : ''}${item.index}. ${cardLabel(item.id)}`,
+        callback_data: modelCardCallbackData(nonce, 's', item.index),
+      }]);
+    }
+    const pager = [];
+    if (current > 0) {
+      pager.push({
+        text: t('上一页'),
+        callback_data: modelCardCallbackData(nonce, 'p', current - 1),
+      });
+    }
+    if (current < pages - 1) {
+      pager.push({
+        text: t('下一页'),
+        callback_data: modelCardCallbackData(nonce, 'p', current + 1),
+      });
+    }
+    if (pager.length > 0) keyboard.push(pager);
+    const heading = pages > 1
+      ? t('可用模型（共 {count} 个，第 {page}/{pages} 页）：', {
+        count: items.length, page: current + 1, pages,
+      })
+      : t('可用模型（共 {count} 个）：', { count: items.length });
+    return {
+      text: [
+        currentId === null ? heading : t('当前模型：{model}', { model: currentId }),
+        ...(currentId === null ? [] : [heading]),
+        ...(Array.isArray(listing.failures) && listing.failures.length > 0
+          ? ['', t('以下模型提供方暂时不可用：'), ...listing.failures.map((name) => `- ${name}`)]
+          : []),
+      ].join('\n'),
+      markup: { inline_keyboard: keyboard },
+      page: current,
+      pages,
+    };
+  },
+  parse: parseTelegramModelCallback,
+});
+
+/**
+ * Encode one external-card press (a card declared in `external-cards.json`).
+ *
+ * `x1|` rather than a per-declaration namespace: the snapshot behind the nonce
+ * already records which declaration produced the card, so a second namespace
+ * would only add a way for the two to disagree.
+ */
+function externalCardCallbackData(nonce, action, argument) {
+  const payload = `x1|${nonce}|${action}`;
+  return argument === undefined ? payload : `${payload}|${argument}`;
+}
+
+/** Parse a press produced by {@link externalCardCallbackData}; null otherwise. */
+export function parseTelegramExternalCardCallback(data) {
+  const match = typeof data === 'string'
+    ? /^x1\|([A-Za-z0-9_-]{1,16})\|([sp])(?:\|(\d{1,4}))?$/u.exec(data)
+    : null;
+  if (!match) return null;
+  return {
+    nonce: match[1],
+    action: match[2],
+    ...(match[3] === undefined ? {} : { index: Number(match[3]) }),
+  };
+}
+
+/**
+ * Inline-keyboard presentation of a user-declared external list.
+ *
+ * The body repeats the declaration's own note (e.g. "an override is currently
+ * in charge") above the rows, because a press whose effect is being overridden
+ * by something else has to say so before the reader presses it, not after.
+ */
+export const TELEGRAM_EXTERNAL_CARD = Object.freeze({
+  render(listing, { nonce, page = 0 } = {}) {
+    if (typeof nonce !== 'string' || !nonce) return null;
+    if (!Array.isArray(listing?.rows)) return null;
+    const rows = listing.rows;
+    const pages = Math.max(1, Math.ceil(rows.length / MAX_MODEL_BUTTONS));
+    const current = Number.isSafeInteger(page) && page >= 0 && page < pages ? page : 0;
+    const start = current * MAX_MODEL_BUTTONS;
+    const title = typeof listing.title === 'string' ? listing.title : '';
+    const keyboard = [];
+    for (const row of rows.slice(start, start + MAX_MODEL_BUTTONS)) {
+      keyboard.push([{
+        text: `${row.current ? '✓ ' : ''}${row.index}. ${cardLabel(row.label)}`,
+        callback_data: externalCardCallbackData(nonce, 's', row.index),
+      }]);
+    }
+    const pager = [];
+    if (current > 0) {
+      pager.push({ text: t('上一页'), callback_data: externalCardCallbackData(nonce, 'p', current - 1) });
+    }
+    if (current < pages - 1) {
+      pager.push({ text: t('下一页'), callback_data: externalCardCallbackData(nonce, 'p', current + 1) });
+    }
+    if (pager.length > 0) keyboard.push(pager);
+    const heading = pages > 1
+      ? t('{title}（共 {count} 个，第 {page}/{pages} 页）：', {
+        title, count: rows.length, page: current + 1, pages,
+      })
+      : t('{title}（共 {count} 个）：', { title, count: rows.length });
+    return {
+      text: [heading, ...(listing.note ? [listing.note] : [])].join('\n'),
+      markup: { inline_keyboard: keyboard },
+      page: current,
+      pages,
+    };
+  },
+  parse: parseTelegramExternalCardCallback,
+});
+
 export class TelegramHarnessBridge extends TextHarnessBridge {
   constructor(options) {
     super({
@@ -251,6 +421,8 @@ export class TelegramHarnessBridge extends TextHarnessBridge {
       interactionCard: TELEGRAM_INTERACTION_CARD,
       workspaceCard: TELEGRAM_WORKSPACE_CARD,
       sessionCard: TELEGRAM_SESSION_CARD,
+      modelCard: TELEGRAM_MODEL_CARD,
+      externalCard: TELEGRAM_EXTERNAL_CARD,
       ...options,
     });
   }
