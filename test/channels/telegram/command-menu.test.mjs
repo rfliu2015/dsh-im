@@ -5,11 +5,20 @@ import { SHARED_COMMAND_CATALOG, commandHelpLines } from '../../../src/channels/
 import { isHistoryCommand } from '../../../src/channels/shared/history-command.mjs';
 import { getImHostLanguage, setImHostLanguage } from '../../../src/channels/shared/i18n.mjs';
 import { isModelCommand } from '../../../src/channels/shared/model-command.mjs';
+import { isPresetCommand } from '../../../src/channels/shared/preset-command.mjs';
+import { isWorkspaceCommand } from '../../../src/channels/shared/workspace-command.mjs';
 import { TelegramApi } from '../../../src/channels/telegram/telegram-api.mjs';
 import { telegramCommandMenu } from '../../../src/channels/telegram/telegram-runtime.mjs';
 
 // Every supported spelling must stay usable. A hidden alias still parses; only
 // its menu slot is gone, so the menu carries one row per command.
+// /workspacelist stays typeable and stays in /help, but keeps no native slot:
+// /workspace (alias /ws) covers listing and switching.
+const HIDDEN_ALIASES = [
+  'ws', 'conversation', 'thread', 'workspaces', 'wsl', 'sessions',
+  'reasonings', 'presets',
+];
+
 for (const command of ['history', 'reasoninglist', 'reasonings', 'reasoning']) {
   test(`the supported /${command} command stays usable`, () => {
     assert.equal(isHistoryCommand(`/${command}`) || isModelCommand(`/${command}`), true);
@@ -23,10 +32,33 @@ for (const command of ['history', 'reasoninglist', 'reasoning']) {
   });
 }
 
-test('/reasonings stays typable but no longer takes a menu slot', () => {
-  assert.equal(isModelCommand('/reasonings'), true);
-  assert.ok(!telegramCommandMenu().some((item) => item.command === 'reasonings'),
-    'an alias must not duplicate its command in the menu');
+for (const alias of HIDDEN_ALIASES) {
+  test(`hidden alias /${alias} still parses but is absent from the native menu`, () => {
+    assert.equal(
+      isWorkspaceCommand(`/${alias}`) || isModelCommand(`/${alias}`) || isPresetCommand(`/${alias}`),
+      true,
+      `/${alias} must stay accepted as typed input`,
+    );
+    assert.ok(!telegramCommandMenu().some((item) => item.command === alias),
+      `/${alias} must not be registered in the native menu`);
+  });
+}
+
+// /help text is pinned byte-for-byte by test/channels/shared/command-help.test.mjs
+// against fixtures/command-help.json; this only checks the documented aliases
+// still appear there after leaving the native menu.
+const DOCUMENTED_ALIASES = [
+  'ws', 'conversation', 'workspaces', 'wsl', 'sessions', 'reasonings', 'presets',
+];
+test('hiding aliases from the native menu leaves the documented /help lines intact', () => {
+  const help = commandHelpLines('telegram');
+  // Upstream pins 30; this fork adds /start (1 line) and /notify (3 lines), so
+  // the documented set is 4 lines larger. Everything below still checks that the
+  // hidden aliases keep their /help lines.
+  assert.equal(help.length, 34);
+  for (const alias of DOCUMENTED_ALIASES) {
+    assert.ok(help.some((line) => line.includes(`/${alias}`)), alias);
+  }
 });
 
 function entry(name, options = {}) {
@@ -72,7 +104,7 @@ test('menu filters unsupported, disabled and hidden commands and aliases in stab
   assert.deepEqual(commandHelpLines('feishu', catalog), ['/repair  Fixture usage']);
 });
 
-test('real catalog preserves existing aliases and excludes channel-specific commands', () => {
+test('real catalog presents only primary names and keeps every alias in help', () => {
   const names = telegramCommandMenu().map((item) => item.command);
   assert.deepEqual(names, [
     // High-frequency block, in the order this bot's reader asked for.
@@ -95,6 +127,9 @@ test('real catalog preserves existing aliases and excludes channel-specific comm
     assert.ok(!names.includes(alias), `${alias} must not duplicate a command`);
   }
   for (const name of ['repair', 'role', 'roles', 'menu', 'm']) assert.ok(!names.includes(name));
+  for (const alias of HIDDEN_ALIASES) assert.ok(!names.includes(alias), alias);
+  const help = commandHelpLines('telegram').join('\n');
+  for (const alias of DOCUMENTED_ALIASES) assert.match(help, new RegExp(`/${alias}\\b`), alias);
   assert.ok(Object.isFrozen(SHARED_COMMAND_CATALOG));
   for (const item of SHARED_COMMAND_CATALOG) {
     assert.ok(Object.isFrozen(item));
@@ -153,7 +188,7 @@ test('production menu rejects invalid data instead of silently omitting or trunc
   assert.deepEqual(telegramCommandMenu([entry('hidden', { menuVisible: false })]), []);
 });
 
-test('Telegram API validates menu boundaries and deletes commands in the requested scope', async () => {
+test('Telegram API validates menu boundaries and sends scoped payloads', async () => {
   const calls = [];
   const api = new TelegramApi({
     token: '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef123456',
@@ -163,7 +198,13 @@ test('Telegram API validates menu boundaries and deletes commands in the request
     },
   });
   const hundred = Array.from({ length: 100 }, (_, i) => ({ command: `c_${i}`, description: 'Valid' }));
+  const first = { command: 'help', description: '显示帮助' };
   await api.setMyCommands({ commands: hundred });
+  await api.setMyCommands({
+    commands: [first],
+    scope: { type: 'all_private_chats' },
+    languageCode: ' en ',
+  });
   for (const commands of [[], [...hundred, hundred[0]], [hundred[0], hundred[0]],
     [{ command: 'empty', description: ' ' }], [{ command: 'long', description: 'a'.repeat(257) }]]) {
     await assert.rejects(() => api.setMyCommands({ commands }), /commands are invalid/);
@@ -172,6 +213,14 @@ test('Telegram API validates menu boundaries and deletes commands in the request
   await api.deleteMyCommands({ scope: { type: 'chat', chat_id: 88 }, languageCode: ' en ' });
   assert.deepEqual(calls, [
     { method: 'setMyCommands', body: { commands: hundred } },
+    {
+      method: 'setMyCommands',
+      body: {
+        commands: [first],
+        scope: { type: 'all_private_chats' },
+        language_code: 'en',
+      },
+    },
     { method: 'deleteMyCommands', body: {} },
     { method: 'deleteMyCommands', body: { scope: { type: 'chat', chat_id: 88 }, language_code: 'en' } },
   ]);

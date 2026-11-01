@@ -22,6 +22,7 @@ import {
   workspaceSessionListing,
   workspaceSwitchFailureText,
 } from './workspace-command.mjs';
+import { runStatusCommand } from './status-command.mjs';
 import { runCompactCommand } from './compact-command.mjs';
 import { isClearCommand, runClearCommand } from './clear-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from './history-command.mjs';
@@ -285,6 +286,9 @@ export class TextHarnessBridge {
   // The Host settings service, when the caller supplies it. External cards may
   // declare a settings rewrite; without this they can only post literal bodies.
   #settings = null;
+  // Optional channel-supplied approval card controller (see HarnessApprovalQueue's
+  // render hook). Null keeps every channel's existing plain-text approval flow.
+  #approvalCard;
   #contextHooks = null;
   // Delivery attempts per message id. A failed turn releases its `markSeen` so
   // the next poll can retry, and this counter is what keeps that from becoming
@@ -329,6 +333,8 @@ export class TextHarnessBridge {
     settings = null,
     deliveryService = null,
     botId = null,
+    approvalCard = null,
+    approvalTimeoutMs,
     contextHooks = null,
     autoSteerSameSender = false,
     autoSteerLimit = 0,
@@ -383,6 +389,7 @@ export class TextHarnessBridge {
     this.#settings = settings ?? null;
     this.#deliveryService = deliveryService ?? null;
     this.#botId = typeof botId === 'string' && botId ? botId : null;
+    this.#approvalCard = approvalCard ?? null;
     // Opt-in follow-up lanes for channels whose groups run on rapid consecutive
     // posts: fold a same sender's burst into one dispatch, and steer that
     // sender's own mid-turn follow-ups into the in-flight turn instead of
@@ -406,6 +413,10 @@ export class TextHarnessBridge {
     this.#approvals = new HarnessApprovalQueue({
       label: descriptor.key,
       logger,
+      // Tests and hosts may shorten the approval deadline; the default stays.
+      ...(Number.isFinite(approvalTimeoutMs) && approvalTimeoutMs > 0
+        ? { approvalTimeoutMs }
+        : {}),
     });
     // A queued message lives only in #queues. If the process dies before its
     // turn runs the user has already been told it is queued, so the persisted
@@ -1281,8 +1292,14 @@ export class TextHarnessBridge {
         return;
       }
       if (!hasImages && !hasFiles && command === '/status') {
-        await this.#harness.ensureRunning({ signal: this.#signal });
-        await this.#bot.sendText(target, t('{label}机器人与 DeepSeek Harness 连接正常。', { label: this.#descriptor.label }));
+        const status = await runStatusCommand({
+          descriptor: this.#descriptor,
+          harness: this.#harness,
+          state: this.#state,
+          conversationKey,
+          signal: this.#signal,
+        });
+        await this.#bot.sendText(target, status.message);
         return;
       }
       if (!hasImages && !hasFiles && /^\/notify(?:\s|$)/iu.test(command)) {
@@ -1389,9 +1406,12 @@ export class TextHarnessBridge {
       if (message.kind === 'group') content = prependSpeakerLabel(content, message.speakerName);
       const snapshot = this.#acceptedMessageIds.get(messageId);
       let contextEnhanced = false;
+      // contextSource() is enhancement-only: it is read here, under an enabled
+      // snapshot, and nowhere else. The author record below reuses this read.
+      let contextSource = null;
       if (snapshot) {
         const originalContent = content ?? text;
-        const contextSource = message.contextSource?.();
+        contextSource = message.contextSource?.() ?? null;
         content = enhanceContextContent(originalContent, snapshot, () => ({
           channel: this.#descriptor.key,
           senderId,
@@ -1451,6 +1471,22 @@ export class TextHarnessBridge {
       // opened: the auto-steer lane keys its authorship decision off this
       // record, and the finally below retires it when the turn settles.
       this.#turnAuthors.set(conversationKey, { senderId, steered: 0, turnMessageId: messageId });
+      // Persist who spoke here last, so a later describeConversation() can name
+      // the sender of a group turn without replaying any message text. Channels
+      // that own a different state store simply skip it.
+      // The sender id and bot flag are always kept. A display name is kept only
+      // when the channel already exposes it (Matrix speakerName) or context
+      // enhancement read it above; a disabled enhancement never leaks names.
+      try {
+        await this.#state.rememberAuthor?.(conversationKey, {
+          senderId,
+          senderName: message.senderName ?? message.speakerName ?? contextSource?.senderName,
+          senderUsername: message.senderUsername ?? contextSource?.senderUsername,
+          isBot: message.senderIsBot === true,
+        });
+      } catch (error) {
+        this.#logger.warn?.(`[dsh-im:${this.#descriptor.key}] unable to remember the conversation author:`, error?.message ?? error);
+      }
       // The prompt is about to enter the Harness inbox, which is itself durable.
       // Marking the entry submitted first means a crash after this point reports
       // the message instead of replaying a turn the Harness may already own.
@@ -2012,6 +2048,26 @@ export class TextHarnessBridge {
     if (modelPress) return this.#handleModelCardPress(callback, key, modelPress);
     const externalPress = this.#externalCard?.parse?.(callback.data) ?? null;
     if (externalPress) return this.#handleExternalCardPress(callback, key, externalPress);
+    // Approval cards own their callback namespace; every other press keeps using
+    // the question-card path below. The card acknowledges the press itself (the
+    // ack must be the first round-trip), so this branch runs before any other
+    // work in acceptCallback.
+    if (this.#approvalCard && typeof this.#approvalCard.handlePress === 'function') {
+      const handled = await this.#approvalCard.handlePress(callback, {
+        bot: this.#bot,
+        answer: (text) => this.#answerInteractionCallback(callback, text),
+        submit: (approvalId, outcome, options) => (
+          this.#approvals.submitByApprovalId(approvalId, outcome, options)
+        ),
+      }).catch((error) => {
+        this.#logger.error?.(
+          `[dsh-im:${this.#descriptor.key}] failed to handle an approval card press:`,
+          error,
+        );
+        return false;
+      });
+      if (handled) return;
+    }
     const pending = this.#pendingInteractions.get(key);
     const notice = (text) => this.#answerInteractionCallback(callback, text);
     if (!pending) return notice(t('该问题已处理，无需再次选择。'));
@@ -3074,11 +3130,37 @@ export class TextHarnessBridge {
     requiresMention,
   }) {
     if (interaction?.kind === 'approval') {
+      const send = (text) => this.#bot.sendText(target, text);
+      // Optional interactive-card presentation. The shared queue calls
+      // `render(pending, send)` instead of the plain text when present and
+      // `onResolved(text, outcome)` after any decision (button or typed reply).
+      let cardContext = null;
+      if (this.#approvalCard && typeof this.#approvalCard.createContext === 'function') {
+        try {
+          cardContext = this.#approvalCard.createContext({
+            key,
+            actor,
+            target,
+            send,
+            bot: this.#bot,
+            logger: this.#logger,
+          });
+        } catch (error) {
+          this.#logger.warn?.(
+            `[dsh-im:${this.#descriptor.key}] approval card unavailable; keeping the text approval:`,
+            error?.message ?? error,
+          );
+        }
+      }
       return this.#approvals.handleRequested(interaction, {
         key,
         actor,
         requiresMention,
-        send: (text) => this.#bot.sendText(target, text),
+        send: typeof cardContext?.send === 'function' ? cardContext.send : send,
+        ...(typeof cardContext?.render === 'function' ? { render: cardContext.render } : {}),
+        ...(typeof cardContext?.onResolved === 'function'
+          ? { onResolved: cardContext.onResolved }
+          : {}),
       });
     }
     if (interaction?.kind !== 'question') return;

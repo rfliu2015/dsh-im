@@ -594,6 +594,14 @@ export class TelegramApi {
     if ((text === undefined) === (richMessage === undefined)) {
       throw new TypeError('Telegram message edit requires exactly one of text or richMessage');
     }
+    // Product invariant (route map F7): a rich answer never carries an inline
+    // keyboard — cards always use regular text. The Bot API would technically
+    // accept reply_markup next to rich_message, so this guard is deliberate.
+    if (richMessage !== undefined && replyMarkup !== undefined) {
+      throw new TypeError(
+        'A rich Telegram answer never carries an inline keyboard; use regular text for cards',
+      );
+    }
     return this.#callUnbudgeted('editMessageText', {
       chat_id: chatId,
       message_id: messageId,

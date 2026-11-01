@@ -62,7 +62,10 @@ for (const code of ['session-not-found', 'session/not-found']) {
           harness, state, key: 'direct:owner', text, askOptions: { timeoutMs: 2_000 },
         }), { sessionId: 'replacement-session', answer: 'recovered' });
       }
-      assert.deepEqual(bindings, ['replacement-session']);
+      // The conversation is bound to a planned id before creation, then to the id the
+      // Harness actually returned; only the last binding has to be the replacement.
+      assert.equal(bindings.at(-1), 'replacement-session');
+      assert.ok(bindings.slice(0, -1).every(id => /^session-[0-9a-f-]{36}$/u.test(id)));
       assert.equal(calls.filter(call => call.method === 'session.create').length, 1);
       assert.equal(calls.filter(call => call.method === 'session.prompt').length, 2);
     });

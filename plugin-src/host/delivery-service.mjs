@@ -482,6 +482,46 @@ export class DeliveryService {
     }
   }
 
+  /**
+   * Describe the conversation a session belongs to, or null when no channel
+   * owns it. Pure lookup: no network, no session creation, no throwing.
+   * @param {string} sessionId harness session id
+   */
+  async describeConversation(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return null;
+    for (const { adapter } of this.#adapters.values()) {
+      if (typeof adapter.describeConversationBySession !== 'function') continue;
+      try {
+        const described = await adapter.describeConversationBySession(sessionId);
+        if (described) return described;
+      } catch {
+        // A channel that cannot answer must not hide the others.
+        continue;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The same lookup, answered from memory only: no await, no network. A session
+   * whose channel has not loaded its state yet answers null — which is exactly the
+   * truth a synchronous prompt assembly can act on.
+   * @param {string} sessionId harness session id
+   */
+  describeConversationSync(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return null;
+    for (const { adapter } of this.#adapters.values()) {
+      if (typeof adapter.describeConversationBySessionSync !== 'function') continue;
+      try {
+        const described = adapter.describeConversationBySessionSync(sessionId);
+        if (described) return described;
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
   async describeBot(botId) {
     const id = botIdOf(botId);
     const registration = await this.#checkedRegistrationFor(id);

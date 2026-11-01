@@ -35,11 +35,22 @@ function commandMenuEntries(catalog, translate) {
       .map((entry) => ({
         command: entry.name,
         description: translate(entry.description ?? item.description),
+        // A private-only command's aliases are private-only too, so the group
+        // scope never advertises a command it cannot run there.
+        privateOnly: (entry.privateOnly ?? item.privateOnly) === true,
       })));
 }
 
+function publicMenuCommands(entries) {
+  return entries.map(({ command, description }) => ({ command, description }));
+}
+
+/**
+ * Flat, scope-agnostic menu (direct-chat superset) used by help/tests and kept
+ * as a stable public shape. Runtime registration uses the scoped lists below.
+ */
 export function telegramCommandMenu(catalog = SHARED_COMMAND_CATALOG) {
-  const commands = commandMenuEntries(catalog, t);
+  const commands = publicMenuCommands(commandMenuEntries(catalog, t));
   validateTelegramCommands(commands, { allowEmpty: true });
   return commands;
 }
@@ -47,8 +58,44 @@ export function telegramCommandMenu(catalog = SHARED_COMMAND_CATALOG) {
 // Retain the source-language export for existing consumers, derived from the
 // catalog. Runtime synchronization always generates a fresh, localized list.
 export const TELEGRAM_COMMAND_MENU = Object.freeze(
-  commandMenuEntries(SHARED_COMMAND_CATALOG, (text) => text).map((item) => Object.freeze(item)),
+  publicMenuCommands(commandMenuEntries(SHARED_COMMAND_CATALOG, (text) => text))
+    .map((item) => Object.freeze(item)),
 );
+
+/**
+ * Telegram resolves the commands shown in a chat from the most specific scope
+ * that applies: a chat scope, then AllPrivateChats / AllGroupChats, then the
+ * default scope. Both lists are registered without a language code, so one
+ * menu covers every client language (the labels follow the host language).
+ */
+export const TELEGRAM_COMMAND_MENU_SCOPES = Object.freeze({
+  private: Object.freeze({ type: 'all_private_chats' }),
+  group: Object.freeze({ type: 'all_group_chats' }),
+});
+
+/**
+ * The two menus the runtime publishes. Private chats receive every command;
+ * groups drop commands whose handlers only accept direct chats (history,
+ * batch, send, cancel). Hiding a command from a menu never changes the
+ * handler's own permission checks.
+ */
+export function telegramCommandMenuScopes(catalog = SHARED_COMMAND_CATALOG) {
+  const entries = commandMenuEntries(catalog, t);
+  const privateCommands = publicMenuCommands(entries);
+  const groupCommands = publicMenuCommands(entries.filter((entry) => !entry.privateOnly));
+  validateTelegramCommands(privateCommands, { allowEmpty: true });
+  validateTelegramCommands(groupCommands, { allowEmpty: true });
+  return Object.freeze([
+    Object.freeze({
+      scope: TELEGRAM_COMMAND_MENU_SCOPES.private,
+      commands: Object.freeze(privateCommands),
+    }),
+    Object.freeze({
+      scope: TELEGRAM_COMMAND_MENU_SCOPES.group,
+      commands: Object.freeze(groupCommands),
+    }),
+  ]);
+}
 
 function mentionedUsername(message, username) {
   if (!username) return false;
@@ -274,6 +321,7 @@ export function normalizeTelegramCallback(update, { botId } = {}) {
       senderName: [callback.from?.first_name, callback.from?.last_name]
         .filter((value) => typeof value === 'string' && value.trim())
         .map((value) => value.trim()).join(' ') || callback.from?.username,
+      senderUsername: callback.from?.username,
       conversationTitle: direct ? undefined : message.chat?.title,
       chatId: String(chatId),
       threadId: messageThreadId === undefined ? undefined : String(messageThreadId),
@@ -399,6 +447,7 @@ export function normalizeTelegramUpdate(update, {
       senderName: [message.from?.first_name, message.from?.last_name]
         .filter((value) => typeof value === 'string' && value.trim())
         .map((value) => value.trim()).join(' ') || message.from?.username,
+      senderUsername: message.from?.username,
       conversationTitle: direct ? undefined : message.chat?.title,
       chatId: String(chatId),
       threadId: messageThreadId === undefined ? undefined : String(messageThreadId),
@@ -714,6 +763,11 @@ export function formatThinkingLine(text) {
   return `💭 ${truncateCapped(firstParagraph, THINKING_LINE_LIMIT)}`;
 }
 
+/** Telegram reports an idempotent edit with HTTP 400; treat it as success. */
+function isMessageNotModified(error) {
+  return /message is not modified/iu.test(error?.message ?? '');
+}
+
 export class TelegramBotClient {
   #api;
   #signal;
@@ -787,24 +841,77 @@ export class TelegramBotClient {
    * keyboard together when `text` is given. A card whose body states the page
    * must update both, or the text and the buttons disagree about the page.
    * An empty keyboard removes it.
+   *
+   * "Message is not modified" is success here: the client already holds the
+   * exact payload, which is the desired end state (a duplicate resolution, or
+   * clearing a keyboard that is already gone).
    */
   async updateInteractionCard(target, providerMessageId, { markup, text } = {}) {
-    if (typeof text === 'string') {
-      await this.#api.editMessageText({
+    try {
+      if (typeof text === 'string') {
+        await this.#api.editMessageText({
+          chatId: target.chatId,
+          messageId: Number(providerMessageId),
+          text,
+          ...(markup === undefined ? {} : { replyMarkup: markup }),
+          signal: this.#signal,
+        });
+        return;
+      }
+      await this.#api.editMessageReplyMarkup({
         chatId: target.chatId,
         messageId: Number(providerMessageId),
-        text,
-        ...(markup === undefined ? {} : { replyMarkup: markup }),
+        replyMarkup: markup,
         signal: this.#signal,
       });
-      return;
+    } catch (error) {
+      if (!isMessageNotModified(error)) throw error;
     }
-    await this.#api.editMessageReplyMarkup({
-      chatId: target.chatId,
-      messageId: Number(providerMessageId),
-      replyMarkup: markup,
-      signal: this.#signal,
-    });
+  }
+
+  /**
+   * Rewrite a delivered card's text and keyboard in one `editMessageText` call.
+   *
+   * Telegram answers "message is not modified" when the client already holds the
+   * exact payload (a duplicate resolution); that is success, not failure. If a
+   * Bot API deployment refuses the combined text+keyboard edit, degrade to the
+   * two calls this client already supports — the interface stays the same.
+   */
+  async editInteractionCard(target, providerMessageId, { text, markup } = {}) {
+    const messageId = Number(providerMessageId);
+    if (!Number.isSafeInteger(messageId)) {
+      throw new TypeError('Telegram card message id must be a safe integer');
+    }
+    try {
+      return await this.#api.editMessageText({
+        chatId: target.chatId,
+        messageId,
+        text,
+        replyMarkup: markup,
+        signal: this.#signal,
+      });
+    } catch (error) {
+      if (isMessageNotModified(error)) return { unchanged: true };
+      if (error?.code !== 'telegram-400' || markup === undefined) throw error;
+      // Clear the dead keyboard first so a stale card cannot keep submitting.
+      try {
+        await this.#api.editMessageReplyMarkup({
+          chatId: target.chatId,
+          messageId,
+          replyMarkup: markup,
+          signal: this.#signal,
+        });
+      } catch (markupError) {
+        if (!isMessageNotModified(markupError)) throw markupError;
+      }
+      await this.#api.editMessageText({
+        chatId: target.chatId,
+        messageId,
+        text,
+        signal: this.#signal,
+      });
+      return { fallback: true };
+    }
   }
 
   /** Stop the client-side spinner on a pressed button. */
@@ -1678,12 +1785,20 @@ export class TelegramRuntime {
     }
   }
 
-  // Both operations use the existing default scope and language. Sending the
-  // full list replaces old entries; an empty catalog clears that list.
+  // Commands are registered per BotCommandScope, and the scopes overlap: a
+  // default-scope list from an earlier version would keep applying wherever a
+  // scoped list is missing and could advertise private-only commands in groups.
+  // The scoped lists are written first and only then is the legacy default
+  // scope cleared, so a failed scoped write leaves the previous (default-scope)
+  // menu usable until the next reconnect instead of blanking the menu. No
+  // language code is sent, so one list covers all client languages.
   async #sendCommandMenu(api, signal) {
-    const commands = telegramCommandMenu(this.#commandCatalog);
-    if (commands.length > 0) await api.setMyCommands({ commands, signal });
-    else await api.deleteMyCommands({ signal });
+    const menus = telegramCommandMenuScopes(this.#commandCatalog);
+    for (const { scope, commands } of menus) {
+      if (commands.length > 0) await api.setMyCommands({ commands, scope, signal });
+      else await api.deleteMyCommands({ scope, signal });
+    }
+    await api.deleteMyCommands({ signal });
   }
 
   /**

@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { ApiError } from '@tencent-connect/qqbot-nodejs';
-import { visibleSessions, workspacePathSnapshot } from '../shared/workspace-command.mjs';
+import {
+  conversationSessionWorkspace,
+  visibleSessions,
+  workspacePathSnapshot,
+} from '../shared/workspace-command.mjs';
 import { t } from '../shared/i18n.mjs';
 
 export const QQ_MENU_TTL_MS = 15 * 60_000;
@@ -88,8 +92,7 @@ async function catalogFor(harness, sessionId, key, options) {
 
 export async function qqMenuView(name, harness, state, key, { signal, busy = false } = {}) {
   const workspace = harness.currentWorkspace?.();
-  const sessionWorkspace = typeof harness.currentConversationWorkspace === 'function'
-    ? harness.currentConversationWorkspace(key) : workspace;
+  const sessionWorkspace = await conversationSessionWorkspace(harness, key, { signal });
   const sessionId = state.sessionFor(key);
   const options = { signal };
   // The toggle still round-trips so an existing stored setting keeps its value,
@@ -98,7 +101,7 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
   if (name === 'main' || name === 'status') {
     if (name === 'status') await harness.ensureRunning(options);
     const results = await Promise.allSettled([
-      harness.listWorkspaceSessions?.(name === 'main' ? sessionWorkspace : workspace, options),
+      harness.listWorkspaceSessions?.(sessionWorkspace, options),
       catalogFor(harness, sessionId, key, options),
       harness.agentPresetSettings?.(options),
     ]);
