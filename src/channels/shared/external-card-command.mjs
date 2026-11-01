@@ -32,6 +32,8 @@ const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 const COMMAND_RE = /^\/[A-Za-z0-9][A-Za-z0-9_-]{0,30}$/u;
 /** A path is a dot-separated list of plain keys, never an index into an array. */
 const PATH_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u;
+/** A provider route id as the Harness spells it in a model listing. */
+const PROVIDER_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u;
 
 function cleanText(value, max = MAX_LABEL) {
   if (typeof value !== 'string') return '';
@@ -168,10 +170,17 @@ function normalizeCard(raw, index) {
   if (noteSpec === null) {
     return { error: `cards[${index}].list.note must be a dot path or {path,is,text}` };
   }
+  const providers = normalizeProviders(raw.providers, index);
+  if (providers.error) return { error: providers.error };
+  const detailSpec = normalizeDetail(list.detail);
+  if (detailSpec === null) {
+    return { error: `cards[${index}].list.detail must be {from,id,value} of dot paths` };
+  }
   return {
     card: {
       command,
       title,
+      providers: providers.list,
       list: {
         url,
         items,
@@ -179,10 +188,69 @@ function normalizeCard(raw, index) {
         label: typeof list.label === 'string' && PATH_RE.test(list.label) ? list.label : '',
         current: typeof list.current === 'string' && PATH_RE.test(list.current) ? list.current : '',
         note: noteSpec,
+        detail: detailSpec,
       },
       actions: normalizedActions,
     },
   };
+}
+
+/**
+ * The provider routes a card speaks for (`providers: ["workbuddy"]`).
+ *
+ * This is the ONLY thing that lets a model picker offer "switch account" for the
+ * model the reader is looking at: the picker knows a model's provider id, and a
+ * card that named that id is the account list for it. Declared here rather than
+ * inferred from the URL because the URL is a route, not a provider id — and
+ * inferred from the command name because `/wb` is user-chosen text.
+ *
+ * An entry that is not a plausible provider id is a spec error, not a silently
+ * dropped one: a typo here produces a button that never appears, which is
+ * exactly the failure this field exists to make impossible.
+ */
+function normalizeProviders(raw, index) {
+  if (raw === undefined) return { list: [] };
+  if (!Array.isArray(raw)) return { error: `cards[${index}].providers must be an array` };
+  const list = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !PROVIDER_RE.test(entry.trim())) {
+      return { error: `cards[${index}].providers must hold provider ids like workbuddy` };
+    }
+    const id = entry.trim();
+    if (!list.includes(id)) list.push(id);
+  }
+  return { list };
+}
+
+/** The card serving one provider route, or undefined. */
+export function externalCardForProvider(provider, cards) {
+  if (typeof provider !== 'string' || !provider) return undefined;
+  return (cards ?? []).find((card) => (card.providers ?? []).includes(provider));
+}
+
+/**
+ * A per-row value looked up in a SECOND array, keyed by the row's own id.
+ *
+ * `{ from: 'pool.accounts', id: 'accountId', value: 'credits' }` — read the
+ * array at `from`, find the entry whose `id` field equals the row's id, and show
+ * its `value` after the label.
+ *
+ * Why a second array and not just a dot path on the row: the per-row figure a
+ * reader needs is often NOT on the row. This card lists the sign-in roster
+ * (`accounts`), while balances live on the pool's own projection
+ * (`pool.accounts`). Pointing `items` at the second array instead would be the
+ * obvious shortcut and is a trap — that array is empty whenever the pool has no
+ * members, which would empty the whole card. A lookup degrades to "no detail"
+ * instead, which is the correct failure for an optional decoration.
+ */
+function normalizeDetail(raw) {
+  if (raw === undefined) return '';
+  if (!plainRecord(raw)) return null;
+  const from = typeof raw.from === 'string' ? raw.from : '';
+  const id = typeof raw.id === 'string' ? raw.id : '';
+  const value = typeof raw.value === 'string' ? raw.value : '';
+  if (!PATH_RE.test(from) || !PATH_RE.test(id) || !PATH_RE.test(value)) return null;
+  return { from, id, value };
 }
 
 /**
@@ -344,15 +412,59 @@ export async function fetchCardListing(card, { baseUrl, fetchImpl, signal } = {}
     return { error: `no array at "${card.list.items}" in the answer` };
   }
   const rows = [];
+  const detailIndex = buildDetailIndex(answer.value, card.list.detail);
   for (const [offset, item] of items.slice(0, MAX_ITEMS).entries()) {
     const id = readPath(item, card.list.id);
     if (typeof id !== 'string' || !id) continue;
     const label = card.list.label ? cleanText(readPath(item, card.list.label)) : '';
     const isCurrent = card.list.current ? readPath(item, card.list.current) === true : false;
-    rows.push({ index: offset + 1, id, label: label || id, current: isCurrent });
+    const detail = formatDetail(detailIndex.get(id));
+    rows.push({
+      index: offset + 1, id, label: label || id, current: isCurrent, ...detail === '' ? {} : { detail },
+    });
   }
   const note = resolveNote(answer.value, card.list.note);
   return { listing: { title: card.title, rows, note } };
+}
+
+/**
+ * Map row id → the raw detail value, from the array `detail.from` names.
+ *
+ * Built once per fetch rather than searched per row: the second array is the
+ * same size as the first, so a per-row scan is quadratic for no benefit.
+ * A missing array yields an empty map — an absent decoration, never an error.
+ */
+function buildDetailIndex(document, detail) {
+  const index = new Map();
+  // `plainRecord`, not `detail === ''`: a card can reach here without going
+  // through the spec validator — a caller may build one by hand — and an absent
+  // field is then `undefined`, not the empty string the normaliser produces.
+  // Reading `.from` off it would throw and take the whole card down with it.
+  if (!plainRecord(detail)) return index;
+  const entries = readPath(document, detail.from);
+  if (!Array.isArray(entries)) return index;
+  for (const entry of entries) {
+    const key = readPath(entry, detail.id);
+    if (typeof key !== 'string' || !key) continue;
+    index.set(key, readPath(entry, detail.value));
+  }
+  return index;
+}
+
+/**
+ * One row's detail text, or '' when there is nothing worth showing.
+ *
+ * Numbers are rounded to two decimals and stripped of trailing zeros: a credit
+ * balance arrives as `3545.09000174`, and printing that in a button wastes the
+ * width on float noise the reader never asked for. Strings pass through the
+ * same sanitiser every other label uses.
+ */
+function formatDetail(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.round(value * 100) / 100);
+  }
+  if (typeof value === 'string') return cleanText(value, 40);
+  return '';
 }
 
 /** The note a card should show, or '' when it does not apply. */

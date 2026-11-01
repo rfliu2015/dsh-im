@@ -196,6 +196,127 @@ test('an unreadable list reports why and renders nothing', async () => {
   assert.match(wrongShape.error, /no array/u);
 });
 
+/** The same card, with a per-row figure looked up in a second array. */
+const DETAIL_SPEC = {
+  version: 1,
+  cards: [{
+    ...SPEC.cards[0],
+    list: {
+      ...SPEC.cards[0].list,
+      detail: { from: 'pool.accounts', id: 'accountId', value: 'credits' },
+    },
+  }],
+};
+
+const DETAIL_ANSWER = {
+  accounts: [
+    { id: 'a1', accountName: 'first', selected: false },
+    { id: 'a2', accountName: 'second', selected: true },
+  ],
+  pool: {
+    enabled: true,
+    accounts: [
+      { accountId: 'a1', credits: 3902.26000015 },
+      { accountId: 'a2', credits: 190 },
+    ],
+  },
+};
+
+test('detail is optional and absent by default', () => {
+  const { cards, error } = normalizeExternalCards(SPEC);
+  assert.equal(error, undefined);
+  assert.equal(cards[0].list.detail, '');
+});
+
+test('a malformed detail rejects the whole spec', () => {
+  for (const detail of ['pool.accounts', { from: '', id: 'a', value: 'b' },
+    { from: 'p', id: 'a' }, { from: 'p', id: 'a', value: 'has space' }, [1]]) {
+    const result = normalizeExternalCards({
+      version: 1,
+      cards: [{ ...SPEC.cards[0], list: { ...SPEC.cards[0].list, detail } }],
+    });
+    assert.ok(result.error, JSON.stringify(detail));
+    assert.deepEqual(result.cards, [], 'no partial cards');
+  }
+});
+
+test('a row carries the figure looked up from the second array, rounded', async () => {
+  const { cards } = normalizeExternalCards(DETAIL_SPEC);
+  const { listing } = await fetchCardListing(cards[0], {
+    baseUrl: 'http://h', fetchImpl: fakeFetch({ json: DETAIL_ANSWER }),
+  });
+  assert.deepEqual(listing.rows.map((r) => r.detail), ['3902.26', '190'],
+    'float noise is trimmed, not carried into the button');
+});
+
+test('a missing second array yields rows without detail, never an error', async () => {
+  // The pool is empty in exactly this shape: `accounts` is complete, but there
+  // is no `pool.accounts` to look balances up in.
+  const { cards } = normalizeExternalCards(DETAIL_SPEC);
+  const { listing, error } = await fetchCardListing(cards[0], {
+    baseUrl: 'http://h',
+    fetchImpl: fakeFetch({ json: { ...DETAIL_ANSWER, pool: { enabled: false } } }),
+  });
+  assert.equal(error, undefined, 'the card still renders');
+  assert.equal(listing.rows.length, 2, 'and every row is still there');
+  assert.deepEqual(listing.rows.map((r) => r.detail), [undefined, undefined]);
+});
+
+test('a row missing from the second array simply has no detail', async () => {
+  const { cards } = normalizeExternalCards(DETAIL_SPEC);
+  const { listing } = await fetchCardListing(cards[0], {
+    baseUrl: 'http://h',
+    fetchImpl: fakeFetch({
+      json: { ...DETAIL_ANSWER, pool: { enabled: true, accounts: [{ accountId: 'a1', credits: 5 }] } },
+    }),
+  });
+  assert.deepEqual(listing.rows.map((r) => r.detail), ['5', undefined]);
+});
+
+test('a hand-built card without a detail field still renders', async () => {
+  // Not every card goes through the spec validator: `fetchCardListing` is
+  // exported, and callers (the bridge's own fixtures included) build card
+  // objects directly. There an absent `detail` is `undefined`, not the `''` the
+  // normaliser produces — reading a path off it used to throw and lose the card.
+  const handBuilt = {
+    command: '/wb',
+    title: 'Accounts',
+    list: {
+      url: '{base}/usage', items: 'accounts', id: 'id', label: 'accountName',
+      current: 'selected', note: '',
+    },
+    actions: [{ post: '{base}/save', body: {} }],
+  };
+  const { listing, error } = await fetchCardListing(handBuilt, {
+    baseUrl: 'http://h', fetchImpl: fakeFetch(),
+  });
+  assert.equal(error, undefined);
+  assert.equal(listing.rows.length, 2);
+  assert.deepEqual(listing.rows.map((r) => r.detail), [undefined, undefined]);
+});
+
+test('the rendered button puts the detail after the label', async () => {
+  const { cards } = normalizeExternalCards(DETAIL_SPEC);
+  const { listing } = await fetchCardListing(cards[0], {
+    baseUrl: 'http://h', fetchImpl: fakeFetch({ json: DETAIL_ANSWER }),
+  });
+  const card = TELEGRAM_EXTERNAL_CARD.render(listing, { nonce: 'n1' });
+  const labels = card.markup.inline_keyboard.flat().map((b) => b.text);
+  assert.equal(labels[0], '1. first · 3902.26');
+  assert.equal(labels[1], '✓ 2. second · 190');
+});
+
+test('a row with no detail renders exactly as before', async () => {
+  const { cards } = normalizeExternalCards(SPEC);
+  const { listing } = await fetchCardListing(cards[0], {
+    baseUrl: 'http://h', fetchImpl: fakeFetch(),
+  });
+  const card = TELEGRAM_EXTERNAL_CARD.render(listing, { nonce: 'n1' });
+  const labels = card.markup.inline_keyboard.flat().map((b) => b.text);
+  assert.equal(labels[0], '1. first', 'no dangling separator');
+  assert.equal(labels[1], '✓ 2. second');
+});
+
 test('actions run in order and expand {base}/{id} into the body', async () => {
   const { cards } = normalizeExternalCards(SPEC);
   const calls = [];

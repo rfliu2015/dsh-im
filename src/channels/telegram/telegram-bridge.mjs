@@ -291,6 +291,11 @@ export function parseTelegramModelCallback(data) {
  * many pages there are. The current model is marked in the row label rather
  * than removed, because its position is what `/model <n>` still resolves — a
  * gap in the numbering would make the printed list and the buttons disagree.
+ *
+ * There is deliberately no separate "switch account" row: pressing the CURRENT
+ * model's row already switches to the model it is on and then offers that
+ * provider's account list, so a second entry point would be the same action
+ * wearing two labels.
  */
 export const TELEGRAM_MODEL_CARD = Object.freeze({
   render(listing, { nonce, page = 0 } = {}) {
@@ -375,6 +380,13 @@ export function parseTelegramExternalCardCallback(data) {
  * The body repeats the declaration's own note (e.g. "an override is currently
  * in charge") above the rows, because a press whose effect is being overridden
  * by something else has to say so before the reader presses it, not after.
+ *
+ * A row may carry a `detail` (a balance, a quota): it goes AFTER the label in
+ * the same button, because the figure exists to help choose between rows and a
+ * separate line would separate it from the thing it describes. The label is
+ * shortened first so the detail is never the part that gets clipped — the label
+ * is how a reader recognises the account, but the detail is why they are
+ * reading the list at all.
  */
 export const TELEGRAM_EXTERNAL_CARD = Object.freeze({
   render(listing, { nonce, page = 0 } = {}) {
@@ -387,8 +399,10 @@ export const TELEGRAM_EXTERNAL_CARD = Object.freeze({
     const title = typeof listing.title === 'string' ? listing.title : '';
     const keyboard = [];
     for (const row of rows.slice(start, start + MAX_MODEL_BUTTONS)) {
+      const detail = typeof row.detail === 'string' ? row.detail : '';
+      const label = cardLabel(row.label, detail ? 28 : 60);
       keyboard.push([{
-        text: `${row.current ? '✓ ' : ''}${row.index}. ${cardLabel(row.label)}`,
+        text: `${row.current ? '✓ ' : ''}${row.index}. ${label}${detail ? ` · ${detail}` : ''}`,
         callback_data: externalCardCallbackData(nonce, 's', row.index),
       }]);
     }

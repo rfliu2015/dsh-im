@@ -45,6 +45,7 @@ import {
 import {
   applyCardActions,
   externalCardFor,
+  externalCardForProvider,
   fetchCardListing,
   loadExternalCards,
   restartStateBaseUrls,
@@ -2636,6 +2637,13 @@ export class TextHarnessBridge {
       for (const reply of result?.messages ?? [result?.message]) {
         if (reply) await this.#bot.sendText(target, reply);
       }
+      // Then offer the account list for the model just chosen, when its provider
+      // declares one. Switching accounts is the reason this picker exists at all
+      // for a pooled provider: a model's quota lives on the ACCOUNT, so "this
+      // model is out of credits" is answered by picking another account, not
+      // another model. The list is read here rather than when the card was drawn
+      // so it reflects balances as of the press.
+      await this.#offerAccountCard(callback, key, target, item.provider);
       return undefined;
     } catch (error) {
       this.#logger.warn?.(
@@ -2649,6 +2657,33 @@ export class TextHarnessBridge {
   }
 
   /**
+   * Open the account list declared for `provider`, if there is one.
+   *
+   * Best-effort by design: this runs AFTER the model switch has already
+   * succeeded and been reported, so a route that is down must not turn a
+   * completed switch into an error. A failure here is logged and swallowed —
+   * the reader still has `/wb` to reach the same list.
+   */
+  async #offerAccountCard(callback, key, target, provider) {
+    const card = externalCardForProvider(provider, this.#externalCards);
+    if (!card) return;
+    try {
+      // No startup grace: the Host answered the model switch a moment ago, so a
+      // route that does not answer now is genuinely absent, not late.
+      const result = await this.#runExternalCard(card, key, { waitMs: 0 });
+      if (await this.#presentExternalCardCommand(target, result)) return;
+      for (const reply of result?.messages ?? [result?.message]) {
+        if (reply) await this.#bot.sendText(target, reply);
+      }
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to offer the account card after a model switch:`,
+        error?.message ?? error,
+      );
+    }
+  }
+
+  /**
    * Run one user-declared external card.
    *
    * The loopback base URL is DISCOVERED, not configured: the Host never exports
@@ -2657,13 +2692,19 @@ export class TextHarnessBridge {
    * URL baked into the declaration would be stale by the next launch. Every
    * candidate is therefore verified by actually calling the declared route.
    */
-  async #runExternalCard(card, key) {
+  async #runExternalCard(card, key, { waitMs = EXTERNAL_CARD_ORIGIN_WAIT_MS } = {}) {
     // Retried as a whole, not just the candidate list. A candidate that names a
     // port which is not (yet) the Host's is not an empty list — the environment
     // variable alone can supply one, and it points at whatever shell started DSH.
     // So the condition to wait on is "no candidate produced the list", not "no
     // candidate exists": at launch the truth is simply not knowable yet.
-    const deadline = Date.now() + EXTERNAL_CARD_ORIGIN_WAIT_MS;
+    //
+    // `waitMs` exists for callers that already KNOW the Host is up — the offer
+    // that follows a model switch runs inside a command the Host just answered.
+    // For those, retrying for the full startup window turns a genuinely missing
+    // route (404: the sibling plugin is not installed) into five seconds of
+    // silence after every single switch.
+    const deadline = Date.now() + waitMs;
     let candidates = [];
     let answer;
     let errors = [];
@@ -2704,7 +2745,8 @@ export class TextHarnessBridge {
     const lines = [t('{title}（共 {count} 个）：', { title: card.title, count: listing.rows.length })];
     if (listing.note) lines.push(listing.note);
     for (const row of listing.rows) {
-      lines.push(`${row.index}. ${row.label}${row.current ? t('（当前）') : ''}`);
+      const detail = typeof row.detail === 'string' && row.detail ? ` · ${row.detail}` : '';
+      lines.push(`${row.index}. ${row.label}${detail}${row.current ? t('（当前）') : ''}`);
     }
     const message = lines.join('\n');
     return {
