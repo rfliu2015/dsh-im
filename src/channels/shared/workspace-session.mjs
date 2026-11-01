@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { withSessionBindingLock } from './session-binding-lock.mjs';
 import { initialSessionTitle } from './session-title.mjs';
 import { extractConnectionEvidence, messageDiagnosticError } from './connection-error.mjs';
@@ -133,12 +134,36 @@ export async function askInWorkspaceSession({
           if (dsBotSessionId) {
             throw Object.assign(new Error('DS Bot 的当前会话不可用。'), { code: 'ds-bot-unavailable' });
           }
-          sessionId = await createSession(harness, {
-            conversationKey: key,
-            ...(createOptions ?? {}),
-          });
+          // Name the Session here and bind it *before* creating it. Prompt
+          // assembly runs inside creation, and a subscriber that resolves the
+          // conversation by session id can only answer if the conversation owns
+          // the id by then.
+          // A Harness that accepts a caller-chosen id lets the binding exist
+          // before the Session does; anything else keeps the old order.
+          const plannedSessionId = harness?.canChooseSessionId === true ? `session-${randomUUID()}` : null;
+          const previousSessionId = plannedSessionId === null ? null : state.sessionFor(key) ?? null;
+          if (plannedSessionId !== null && await state.setSession(key, plannedSessionId) === false) return null;
+          try {
+            sessionId = await createSession(harness, {
+              conversationKey: key,
+              ...(plannedSessionId === null ? {} : { sessionId: plannedSessionId }),
+              ...(createOptions ?? {}),
+            });
+          } catch (error) {
+            // The binding must not outlive a Session that was never created, and a
+            // failed replacement must leave the previous binding in place.
+            if (plannedSessionId !== null) {
+              if (previousSessionId === null) await state.clearSession?.(key);
+              else await state.setSession(key, previousSessionId);
+            }
+            throw error;
+          }
           diagnostic.sessionId = sessionId;
-          if (await state.setSession(key, sessionId) === false) return null;
+          if (plannedSessionId === null) {
+            if (await state.setSession(key, sessionId) === false) return null;
+          } else if (sessionId !== plannedSessionId && await state.setSession(key, sessionId) === false) {
+            return null;
+          }
           // Binding committed: capture the conversation's effective-workspace
           // generation together with the session, so the prompt below is fenced
           // against a conversation switch that only commits after the bind.

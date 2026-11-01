@@ -5,6 +5,7 @@ import {
   privateDeliverySuggestionFromConversationKey,
   resolvePrivateConversationKey,
 } from './delivery-suggestions.mjs';
+import { parseConversationKey } from '../../src/channels/shared/conversation/describe.mjs';
 import { withSessionBindingLock } from '../../src/channels/shared/session-binding-lock.mjs';
 import { dsBotError } from './ds-bot-client.mjs';
 
@@ -217,6 +218,85 @@ export function sessionSyncTarget(channel, workspaces, configured) {
   return target ? { ...target, targetId: configured.targetId } : null;
 }
 
+/** Describe the conversation of one channel's state that owns `sessionId`. */
+function describeFromState(state, sessionId, channel) {
+  const sessions = stateSessions(state);
+  if (!sessions) return null;
+  const conversationKey = Object.keys(sessions).find((key) => sessions[key] === sessionId);
+  if (!conversationKey) return null;
+  const snapshot = typeof state.snapshot === 'function' ? state.snapshot() : null;
+  const authors = snapshot?.authors && typeof snapshot.authors === 'object'
+    && !Array.isArray(snapshot.authors) ? snapshot.authors : null;
+  const parsed = parseConversationKey(conversationKey, { channel });
+  const author = authors?.[conversationKey] ?? null;
+  return {
+    conversationKey,
+    chatType: parsed?.chatType ?? null,
+    chatId: parsed?.chatId ?? null,
+    threadId: parsed?.threadId ?? null,
+    chatTitle: null,
+    senderId: author?.senderId ?? parsed?.senderId ?? null,
+    senderName: author?.senderName ?? null,
+    senderUsername: author?.senderUsername ?? null,
+    senderIsBot: author ? author.isBot === true : null,
+  };
+}
+
+function botIdsOfChannel(workspaces) {
+  try {
+    return workspaces.listBotIds();
+  } catch {
+    return [];
+  }
+}
+
+/** The bot and the conversation binding that own `sessionId`, awaiting each state. */
+async function findBySession(workspaces, stateOf, sessionId, channel) {
+  if (typeof sessionId !== 'string' || sessionId === '') return null;
+  for (const botId of botIdsOfChannel(workspaces)) {
+    let state;
+    try {
+      state = await stateOf(botId);
+    } catch {
+      continue;
+    }
+    let binding = null;
+    try {
+      binding = describeFromState(state, sessionId, channel);
+    } catch {
+      continue;
+    }
+    if (binding !== null) return { botId, binding };
+  }
+  return null;
+}
+
+/**
+ * The same lookup over states that are already in memory. Never awaits: prompt
+ * assembly is synchronous, and a lookup that cannot answer right now has to say
+ * `null` instead of starting work the caller will never see.
+ */
+function findBySessionSync(workspaces, stateOf, sessionId, channel) {
+  if (typeof sessionId !== 'string' || sessionId === '') return null;
+  for (const botId of botIdsOfChannel(workspaces)) {
+    let state;
+    try {
+      state = stateOf(botId);
+    } catch {
+      continue;
+    }
+    if (!state) continue;
+    let binding = null;
+    try {
+      binding = describeFromState(state, sessionId, channel);
+    } catch {
+      continue;
+    }
+    if (binding !== null) return { botId, binding };
+  }
+  return null;
+}
+
 function stateSessions(state) {
   if (!state || typeof state.snapshot !== 'function') return null;
   const sessions = state.snapshot()?.sessions;
@@ -246,7 +326,14 @@ function sessionSyncView(channel, target, sessions, configured) {
 }
 
 /** Bind one channel's existing workspace store and unwrapped controller to DeliveryService. */
-export function createDeliveryAdapter({ channel, workspaces, coreController, stateFor, dsBot }) {
+export function createDeliveryAdapter({
+  channel,
+  workspaces,
+  coreController,
+  stateFor,
+  stateForSync = null,
+  dsBot,
+}) {
   if (!supportsDeliveryChannel(channel)) throw new TypeError(`Unsupported delivery channel: ${channel}`);
   if (!workspaces || typeof workspaces !== 'object') {
     throw new TypeError('delivery adapter requires a workspace store');
@@ -335,6 +422,40 @@ export function createDeliveryAdapter({ channel, workspaces, coreController, sta
     listDsBotBindings: () => workspaces.listDsBotBindings().filter(({ conversationKey }) => (
       privateDeliverySuggestionFromConversationKey(channel, conversationKey)
     )),
+    /**
+     * Reverse lookup for a session: which conversation of this channel owns it.
+     * Reads only what the channel already keeps (its state file), never the
+     * network, and never throws — an unknown session is simply `null`.
+     */
+    async describeConversationBySession(sessionId) {
+      const found = await findBySession(workspaces, stateFor, sessionId, channel);
+      if (found === null) return null;
+      const { botId, binding } = found;
+      let botName = null;
+      try {
+        if (typeof coreController.describeDeliveryAccount === 'function') {
+          botName = (await coreController.describeDeliveryAccount(botId))?.name ?? null;
+        }
+      } catch {
+        botName = null;
+      }
+      return { channel, botId, botName, ...binding };
+    },
+
+    /**
+     * The same lookup without a single `await`: prompt assembly is synchronous and
+     * cannot wait for a promise. Reads only state that is already loaded in this
+     * process, so a session of a bot that was never touched answers `null` — the
+     * caller decides what an unknown session means. `botName` is left out on
+     * purpose: naming a bot needs the network, and a never-awaited lookup must not
+     * start one.
+     */
+    describeConversationBySessionSync(sessionId) {
+      if (typeof stateForSync !== 'function') return null;
+      const found = findBySessionSync(workspaces, stateForSync, sessionId, channel);
+      if (found === null) return null;
+      return { channel, botId: found.botId, botName: null, ...found.binding };
+    },
     async listTargets(botId) {
       const targets = workspaces.listDeliveryTargets(botId);
       const configured = new Map(

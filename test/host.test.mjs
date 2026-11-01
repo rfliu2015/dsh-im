@@ -13,6 +13,23 @@ const NO_CHANNELS = Object.freeze({
   applyIMessage: async () => {}, applyOffice: async () => {},
 });
 
+test('Host forwards its management authority to both general settings and updates', async () => {
+  for (const rpcAuthority of [undefined, 'trusted-host', 'loopback']) {
+    const seen = [];
+    const config = { rpcAuthority };
+    const internals = Object.fromEntries(CHANNELS.map(([, applyName]) => [applyName, async () => {}]));
+    Object.assign(internals, {
+      createDeliveryService: () => ({}),
+      installHostLanguage: () => undefined,
+      installUpdateRpc: (_ctx, options) => seen.push(['update', options?.authority]),
+      installInboundTtlRpc: (_ctx, options) => { assert.equal(options.config, config); seen.push(['settings', options.config.rpcAuthority]); },
+      installSidebarSettingsRpc: () => {}, installDeliveryRpc: () => {},
+    });
+    await createImHostPlugin(internals).apply({ connection: { fetch: {} } }, config);
+    assert.deepEqual(seen, [['update', rpcAuthority], ['settings', rpcAuthority]]);
+  }
+});
+
 test('Host resolves the bot message language before channels start and serves its RPC', async () => {
   const order = [];
   let resolved = false;
@@ -75,7 +92,8 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
   const ctx = { marker: 'shared-context' };
   const config = {
     rpcAuthority: 'trusted-host',
-    feishu: { domain: 'feishu' },
+    groupByAgentPreset: true,
+    feishu: { domain: 'feishu', groupByAgentPreset: false },
     weixin: { timeout: 30 },
     dingtalk: { replyTimeoutMs: 60_000 },
     wecom: { replyTimeoutMs: 60_000 },
@@ -97,17 +115,17 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
     'typertGateway',
   ]);
   assert.deepEqual(calls, [
-    ['feishu', ctx, { ...config.feishu, rpcAuthority: 'trusted-host', deliveryService }],
-    ['weixin', ctx, { ...config.weixin, rpcAuthority: 'trusted-host', deliveryService }],
-    ['dingtalk', ctx, { ...config.dingtalk, rpcAuthority: 'trusted-host', deliveryService }],
-    ['wecom', ctx, { ...config.wecom, rpcAuthority: 'trusted-host', deliveryService }],
-    ['qq', ctx, { ...config.qq, rpcAuthority: 'trusted-host', deliveryService }],
-    ['slack', ctx, { ...config.slack, rpcAuthority: 'trusted-host', deliveryService }],
-    ['telegram', ctx, { ...config.telegram, rpcAuthority: 'trusted-host', deliveryService }],
-    ['discord', ctx, { ...config.discord, rpcAuthority: 'trusted-host', deliveryService }],
-    ['whatsapp', ctx, { ...config.whatsapp, rpcAuthority: 'trusted-host', deliveryService }],
-    ['imessage', ctx, { ...config.imessage, rpcAuthority: 'trusted-host', deliveryService }],
-    ['office', ctx, { ...config.office, rpcAuthority: 'trusted-host' }],
+    ['feishu', ctx, { groupByAgentPreset: true, ...config.feishu, rpcAuthority: 'trusted-host', deliveryService }],
+    ['weixin', ctx, { groupByAgentPreset: true, ...config.weixin, rpcAuthority: 'trusted-host', deliveryService }],
+    ['dingtalk', ctx, { groupByAgentPreset: true, ...config.dingtalk, rpcAuthority: 'trusted-host', deliveryService }],
+    ['wecom', ctx, { groupByAgentPreset: true, ...config.wecom, rpcAuthority: 'trusted-host', deliveryService }],
+    ['qq', ctx, { groupByAgentPreset: true, ...config.qq, rpcAuthority: 'trusted-host', deliveryService }],
+    ['slack', ctx, { groupByAgentPreset: true, ...config.slack, rpcAuthority: 'trusted-host', deliveryService }],
+    ['telegram', ctx, { groupByAgentPreset: true, ...config.telegram, rpcAuthority: 'trusted-host', deliveryService }],
+    ['discord', ctx, { groupByAgentPreset: true, ...config.discord, rpcAuthority: 'trusted-host', deliveryService }],
+    ['whatsapp', ctx, { groupByAgentPreset: true, ...config.whatsapp, rpcAuthority: 'trusted-host', deliveryService }],
+    ['imessage', ctx, { groupByAgentPreset: true, ...config.imessage, rpcAuthority: 'trusted-host', deliveryService }],
+    ['office', ctx, { groupByAgentPreset: true, ...config.office, rpcAuthority: 'trusted-host' }],
   ]);
 });
 
@@ -115,7 +133,12 @@ test('Host provides #65 and installs #84 with the same delivery service', async 
   const sent = [];
   const historyReads = [];
   const created = [];
+  const described = [];
   const deliveryService = {
+    async describeConversation(sessionId) {
+      described.push(sessionId);
+      return { conversationKey: 'group:1', senderId: 'x' };
+    },
     async historyChecked(...args) { historyReads.push(args); return {events:[],hasMore:false}; },
     async send(...args) { sent.push(args); return { sent: true }; },
     async listTargets(botId) {
@@ -143,11 +166,13 @@ test('Host provides #65 and installs #84 with the same delivery service', async 
     installDeliveryRpc: (...args) => rpc.push(args),
     installDeliveryHttp: (...args) => http.push(args),
   });
+  const logLines = [];
   const ctx = {
     connection: { fetch: {} },
     webServer: { register() {} },
     effect() {},
     provide: (...args) => provided.push(args),
+    logger: () => ({ info: (...args) => logLines.push(args.join(' ')) }),
   };
 
   await createImHostPlugin(internals).apply(ctx, { rpcAuthority: 'trusted-host' });
@@ -168,6 +193,16 @@ test('Host provides #65 and installs #84 with the same delivery service', async 
   assert.deepEqual(sent, [['bot_one', 'target', 'hello', undefined]]);
   assert.deepEqual(await provided[0][1].historyChecked('bot_one', {messageId:'anchor'}, {scope:'thread',limit:1}, {}), {events:[],hasMore:false});
   assert.deepEqual(historyReads, [['bot_one',{messageId:'anchor'},{scope:'thread',limit:1},{}]]);
+  // The public async lookup must be callable through `ctx.provide`, not just
+  // constructed: a wrapper defined outside `apply()` used to throw
+  // `ReferenceError: deliveryService is not defined` here.
+  assert.deepEqual(await provided[0][1].describeConversation('session-1'), {
+    conversationKey: 'group:1', senderId: 'x',
+  });
+  assert.deepEqual(described, ['session-1']);
+  assert.equal(logLines.filter((line) => line.includes('describeConversation')).length, 1);
+  await provided[0][1].describeConversation('session-1');
+  assert.equal(logLines.filter((line) => line.includes('describeConversation')).length, 1, 'one line per session');
 });
 
 test('#65 activates a real Cordis consumer without crossing the Connection RPC', async (t) => {

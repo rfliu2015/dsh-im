@@ -1351,6 +1351,14 @@ export class HarnessClient {
     return created.workspace.workspaceId;
   }
 
+  /**
+   * This client can name a Session up front (`session.create` accepts `sessionId`),
+   * which lets a caller bind a conversation before prompt assembly runs.
+   */
+  get canChooseSessionId() {
+    return true;
+  }
+
   async createSession(options = {}) {
     const { agentPreset: requestedPreset, ...rpcOptions } = options;
     const workspace = rpcOptions.workspace ?? this.#workspace;
@@ -1362,6 +1370,11 @@ export class HarnessClient {
       : { workspaceId: await this.workspaceId(rpcOptions) };
     const agentPreset = requestedPreset !== undefined ? requestedPreset : this.#agentPreset;
     if (agentPreset != null) payload.agentPreset = agentPreset;
+    // The caller may name the Session: it then knows the identity before the
+    // Session exists, which is the only way prompt assembly can see it.
+    if (typeof options.sessionId === 'string' && options.sessionId !== '') {
+      payload.sessionId = options.sessionId;
+    }
     const created = await this.rpc('session.create', payload, 30_000, rpcOptions);
     if (typeof created?.sessionId !== 'string' || !created.sessionId) {
       throw new HarnessTransportError('harness-response-invalid', 'session.create');

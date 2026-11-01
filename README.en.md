@@ -259,6 +259,40 @@ See the [Proactive Delivery Guide](PROACTIVE_DELIVERY.en.md) ([简体中文](PRO
 
 DSH versions supporting global panels show **IM bots** in the left sidebar, using a thin monochrome outline of the catalog's linked speech bubbles to open the full management panel. Settings → IM bots and the plugin detail page's Open IM bots action remain available. Shells can also embed the panel through the optional `dshImClient` service. See the [client integration guide](docs/client-integration.md) for the contract, compatibility requirements and lifecycle example.
 
+### Session → conversation lookup (host service)
+
+Other plugins may receive only a Session id while needing to know which channel, bot, chat, or topic owns it. The host service `dshIm` exposes a read-only lookup for that purpose:
+
+```js
+const info = await dshIm.describeConversation(sessionId);
+// null — the Session is not owned by an IM conversation
+// otherwise:
+// { channel, botId, botName, conversationKey, chatType,
+//   chatId, threadId, chatTitle,
+//   senderId, senderName, senderUsername, senderIsBot }
+```
+
+- Read-only: no network access, session creation, blocking reply, or thrown error; unknown Sessions return `null`.
+- Data comes from the plugin's state files (`sessions`) and bot configuration; no new core fields are required.
+- `chatType` is `group`, `thread`, or `dm`; a `direct:dm:<id>` key supplies `<id>` as `senderId`.
+- The first lookup logs one line per Session; later lookups do not repeat it.
+- The bridge remembers the last inbound author's id, name, username, and bot flag in the bot state, without storing message text.
+
+### The two binding events
+
+A binding change is announced synchronously, so a subscriber keeps its own session → identity table without asking back:
+
+| Event | Emitted when | Payload |
+| --- | --- | --- |
+| `dsh-im/session-pre-bind` | a conversation is bound to a session, before `session.create` | `channel`, `botId`, `sessionId`, `conversationKey`, `chatType`, `chatId`, `threadId`, `senderId`, `senderName` |
+| `dsh-im/session-unbind` | the conversation no longer points at its session: it moved to another one, or the binding was cleared | the same fields without the author; `sessionId` is the old session that was detached |
+
+- Both are synchronous, and the order is detach-then-bind, so a subscriber reads one straight line.
+- Only committed writes announce anything: a refused write (`false`) or a rewrite of the same session emits no `unbind`.
+- Clearing one binding (`clearSession`) or every binding (`clearSessions`) emits a `session-unbind` per conversation.
+- A throwing subscriber never breaks message handling.
+- A detach does not erase the session's identity: keeping the row (with a `superseded_at`, for instance) still lets a scheduled task that owns that session deliver into the original chat — only "who owns this conversation" has to be answered from the latest bind.
+
 ### Context enhancement
 
 [Read the context enhancement guide](docs/context-enhancement.md)
@@ -321,6 +355,11 @@ DingTalk menus use a shared template built into the plugin; no template setup is
 
 ## Other features
 
+### Group new sessions by Agent Preset
+
+Set `groupByAgentPreset: true` in the plugin Host config to opt in (off by default). A per-channel value overrides the plugin default. An explicit preset creates or reuses a named `presets/<preset-id>` workspace under the default IM directory for new sessions. Existing chats retain their history and location; manual workspaces, conversation overrides and Feishu directory isolation take priority. See [configuration and behavior](docs/preset-workspaces.md).
+
+
 - **Image understanding**: built-in channels with image input support can send JPEG, PNG, WebP, and GIF files sent as images to Harness, with an optional text description. Originals are saved in the workspace (default 30 MB per image, 20 images per message). Model copies are resized or compressed within configurable 5 MB per-image and 20 MB total budgets, with workspace-file fallback when necessary. Configure these limits in General settings → Attachments → Image input. iMessage's MVP supports text DMs only.
 - **Switch workspaces from a bot card**: every bot card on the settings page shows its current Harness workspace. Enter an existing absolute directory path directly or open the directory picker. Switching clears only that bot's old chat mappings; it never deletes, empties, or archives old Sessions. Replies already in progress may finish, while later messages use the new workspace.
 - **Default directory and ungrouped sessions**: bots using the default share `$DSH_HOME/im`, while retaining separate chat-to-Session mappings. The plugin creates no workspace group for this directory. Use `/sessions` to list its ungrouped sessions and `/session <Session ID>` or `/session N` to bind an ordinary session. New sessions in other directories use the existing workspace grouping mechanism; switching back to the default directory creates ungrouped sessions again. Existing bot directories are not migrated automatically.
@@ -382,7 +421,9 @@ To additionally restrict IM management to local access, set the following in the
     rpcAuthority: loopback
 ```
 
-`rpcAuthority` defaults to `trusted-host`; explicitly selecting `loopback` additionally requires loopback Host and Origin values. Update and inbound TTL management always remain loopback-only.
+`rpcAuthority` defaults to `trusted-host` for channel management, general settings (group history retention, attachment retention and cleanup, and image limits), and plugin updates. LAN and NAS/Docker requests that pass DSH authentication and Host/Origin checks can use these APIs. Explicitly selecting `loopback` additionally requires a loopback Host and, when present, a loopback Origin.
+
+For management HTTP 401 errors, sign in again using a valid launch link. HTTP 403 means access was denied: check DSH trusted hosts, the proxy's Host/Origin handling, and the plugin's `rpcAuthority` setting. When accessing a remote NAS, do not change the browser address to localhost on your own computer. API access does not make every installation eligible for button updates: source/link installations and unsupported runtimes retain their existing restrictions. Installation confirmation, version checks, concurrency locks, and manual restart requirements are unchanged.
 
 After building the plugin, run `node scripts/verify-lan-management.mjs /path/to/built/deepseek-harness` for the LAN management HTTP integration check. It starts the original DSH CLI with an isolated temporary profile and no bot credentials, checks default access, authentication, Host/Origin checks, and explicit `loopback` restrictions, then stops the server and removes the temporary directory. Requests carry LAN Host/Origin values over loopback TCP; a browser on a second device requires separate verification. The original `0.1.5-alpha.1` CLI rejects `--host 0.0.0.0`, so that browser check needs a Harness environment that supports LAN access.
 

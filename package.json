@@ -1,6 +1,6 @@
 {
   "name": "@xmanrui/dsh-im",
-  "version": "5.8.0",
+  "version": "5.9.1",
   "icon": "./assets/logo-plugin-message-link-gradient.webp",
   "description": "把微信、飞书、企微、钉钉、QQ、Telegram、WhatsApp、Slack、Discord、Matrix接入DSH。 Connect Telegram, WhatsApp, Slack, Discord, Matrix, WeChat, Feishu, WeCom, DingTalk, and QQ to DSH.",
   "keywords": [
@@ -56,6 +56,7 @@
     "lib",
     "locale/*.json",
     "plugin-src",
+    "scripts/telegram-menu-scopes.mjs",
     "scripts/verify-interface-language.mjs",
     "scripts/verify-injected-context.mjs",
     "scripts/verify-lan-management.mjs",
@@ -68,6 +69,7 @@
     "PROACTIVE_DELIVERY.en.md",
     "docs/client-integration.md",
     "docs/fork-install-and-config.md",
+    "docs/preset-workspaces.md",
     "LICENSE",
     "README.md",
     "README.en.md",
