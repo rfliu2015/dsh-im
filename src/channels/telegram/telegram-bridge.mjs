@@ -75,55 +75,95 @@ export const TELEGRAM_INTERACTION_CARD = Object.freeze({
 });
 
 /**
- * One keyboard row per workspace. Rows stack with no pagination: beyond this
- * the phone view becomes a wall of buttons, so the bridge falls back to the
- * text list that already answers `/ws <index>` (explicit degradation).
+ * One page of workspace rows. Eight, same ceiling as the session and model
+ * cards: a keyboard taller than a phone screen is a scroll, not a list. The
+ * old single-screen card refused to render at all beyond 20 workspaces and
+ * fell back to the text list; paging keeps the card for any number of them.
+ * Labels are computed over the FULL list, because a title collision on
+ * another page still has to be disambiguated on this one.
  */
-const MAX_WORKSPACE_BUTTONS = 20;
+const MAX_WORKSPACE_BUTTONS = 8;
 
 /**
- * Encode one workspace button. The path cannot ride in `callback_data` (64-byte
- * budget), so the press carries a presentation nonce plus the index into the
- * snapshot the bridge cached when it sent the card. A stale card therefore
- * cannot switch to a workspace that a fresher list no longer contains.
+ * Encode one workspace-card press.
+ *
+ * A path cannot ride in `callback_data` (64-byte budget), so a press carries a
+ * presentation nonce plus an action: `s` switches to an index into the cached
+ * snapshot, `p` turns to a page. The index is the position in `listing.paths`,
+ * not a position on the visible page, so a press on page two names the same
+ * workspace the text list numbers.
  */
-function workspaceCardCallbackData(nonce, index) {
-  // Versioned namespace (upstream convention, cf. openclaw tga1:/tgq1:): a future
-  // payload change can tell an old card apart instead of mis-parsing it.
-  return `w1|${nonce}|${index}`;
+function workspaceCardCallbackData(nonce, action, argument) {
+  // Versioned namespace (upstream convention, cf. openclaw tga1:/tgq1:): a
+  // future payload change can tell an old card apart instead of mis-parsing it.
+  // `w1` was the index-only payload; `w2` adds the action.
+  const payload = `w2|${nonce}|${action}`;
+  return argument === undefined ? payload : `${payload}|${argument}`;
 }
 
-/** Parse a press produced by {@link workspaceCardCallbackData}; null for foreign payloads. */
+/** Parse a workspace-card press; null for foreign payloads. */
 export function parseTelegramWorkspaceCallback(data) {
-  const match = typeof data === 'string'
-    ? /^w1\|([A-Za-z0-9_-]{1,16})\|(\d{1,3})$/u.exec(data)
-    : null;
-  if (!match) return null;
-  return { nonce: match[1], index: Number(match[2]) };
+  if (typeof data !== 'string') return null;
+  const match = /^w2\|([A-Za-z0-9_-]{1,16})\|([sp])\|(\d{1,4})$/u.exec(data);
+  if (match) {
+    return { nonce: match[1], action: match[2], index: Number(match[3]) };
+  }
+  // A card delivered before paging existed named a switch by index alone. Keep
+  // it working rather than leaving an old keyboard with an unparseable press.
+  const legacy = /^w1\|([A-Za-z0-9_-]{1,16})\|(\d{1,3})$/u.exec(data);
+  return legacy ? { nonce: legacy[1], action: 's', index: Number(legacy[2]) } : null;
 }
 
 /**
  * Inline-keyboard presentation for the merged `/ws` listing.
  *
- * The card text is deliberately state-free: after a press only the keyboard is
- * replaced (`editMessageReplyMarkup`), so a "current: …" sentence in the body
- * would immediately lie about which workspace is current.
+ * The body deliberately states only count and page, never which workspace is
+ * current: a switch elsewhere can change the current workspace while this card
+ * is on screen. The ✓ marker lives in the keyboard and is re-marked in place.
  */
 export const TELEGRAM_WORKSPACE_CARD = Object.freeze({
-  render(listing, { nonce } = {}) {
+  render(listing, { nonce, page = 0 } = {}) {
     if (typeof nonce !== 'string' || !nonce) return null;
     const paths = Array.isArray(listing?.paths) ? listing.paths : [];
-    if (paths.length === 0 || paths.length > MAX_WORKSPACE_BUTTONS) return null;
-    const current = typeof listing?.current === 'string' ? listing.current : null;
+    if (paths.length === 0) return null;
+    const pages = Math.max(1, Math.ceil(paths.length / MAX_WORKSPACE_BUTTONS));
+    const current = Number.isSafeInteger(page) && page >= 0 && page < pages ? page : 0;
+    const start = current * MAX_WORKSPACE_BUTTONS;
+    const currentPath = typeof listing?.current === 'string' ? listing.current : null;
     const labels = workspaceLabels(paths, listing?.titles ?? {});
+    const keyboard = paths.slice(start, start + MAX_WORKSPACE_BUTTONS).map((path, offset) => {
+      const index = start + offset;
+      return [{
+        text: `${path === currentPath ? '✓ ' : ''}${index + 1}. ${labels[index].label}`,
+        callback_data: workspaceCardCallbackData(nonce, 's', index),
+      }];
+    });
+    // Only pages that exist get a button, so Telegram never sees an identical
+    // keyboard edit (which it rejects as "message is not modified").
+    const pager = [];
+    if (current > 0) {
+      pager.push({
+        text: t('上一页'),
+        callback_data: workspaceCardCallbackData(nonce, 'p', current - 1),
+      });
+    }
+    if (current < pages - 1) {
+      pager.push({
+        text: t('下一页'),
+        callback_data: workspaceCardCallbackData(nonce, 'p', current + 1),
+      });
+    }
+    if (pager.length > 0) keyboard.push(pager);
+    const heading = pages > 1
+      ? t('选择要切换的工作区（共 {count} 个，第 {page}/{pages} 页）：', {
+        count: paths.length, page: current + 1, pages,
+      })
+      : t('选择要切换的工作区（共 {count} 个）：', { count: paths.length });
     return {
-      text: t('选择要切换的工作区（共 {count} 个）：', { count: paths.length }),
-      markup: {
-        inline_keyboard: paths.map((path, index) => [{
-          text: `${path === current ? '✓ ' : ''}${index + 1}. ${labels[index].label}`,
-          callback_data: workspaceCardCallbackData(nonce, index),
-        }]),
-      },
+      text: heading,
+      markup: { inline_keyboard: keyboard },
+      page: current,
+      pages,
     };
   },
   parse: parseTelegramWorkspaceCallback,

@@ -22,7 +22,11 @@ export default {
   '下方按钮可切换工作区，选定后即可绑定该工作区的会话。':
     'The buttons below switch the Workspace; once there, you can bind one of its Sessions.',
   // /ws workspace picker card: one tap switches, the pressed card is re-marked in place.
+  // Two count/page shapes stay separate keys: dictionaries are keyed by the exact
+  // literal passed to t(), so a built-up key would never match.
   '选择要切换的工作区（共 {count} 个）：': 'Choose a Workspace to switch to ({count} total):',
+  '选择要切换的工作区（共 {count} 个，第 {page}/{pages} 页）：':
+    'Choose a Workspace to switch to ({count} total, page {page}/{pages}):',
   '这个列表已过期，请重新发送 /ws。': 'This list has expired. Send /ws again.',
   '正在切换工作区，请稍候。': 'Switching Workspaces, one moment.',
   '已经在工作区：{workspace}': 'Already in this Workspace: {workspace}',

@@ -2224,9 +2224,16 @@ export class TextHarnessBridge {
       || typeof this.#workspaceCard?.render !== 'function'
       || typeof this.#bot.sendInteractionCard !== 'function') return false;
     const nonce = randomBytes(WORKSPACE_CARD_NONCE_BYTES).toString('base64url');
-    const card = this.#workspaceCard.render(listing, { nonce });
+    const card = this.#workspaceCard.render(listing, { nonce, page: 0 });
     if (!card) return false;
-    const entry = { listing, key: conversationKey, target, createdAt: Date.now(), submitting: false };
+    const entry = {
+      listing,
+      key: conversationKey,
+      target,
+      page: card.page ?? 0,
+      createdAt: Date.now(),
+      submitting: false,
+    };
     this.#rememberWorkspaceCard(nonce, entry);
     try {
       const sent = await this.#bot.sendInteractionCard(target, card);
@@ -2292,6 +2299,37 @@ export class TextHarnessBridge {
     }
   }
 
+  /**
+   * Show another page of the same workspace snapshot. Body and keyboard move
+   * together so the page number cannot disagree with the buttons; the nonce,
+   * the listing, and therefore every absolute index stay identical, so a press
+   * on page two switches the workspace the full text list numbers there.
+   */
+  async #workspaceCardPage(callback, entry, press) {
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    const expired = t('这个列表已过期，请重新发送 /ws。');
+    if (typeof this.#bot.updateInteractionCard !== 'function') return notice(expired);
+    const page = press.index ?? 0;
+    if (page === entry.page) return notice(t('已经是这一页了。'));
+    const card = this.#workspaceCard.render(entry.listing, { nonce: press.nonce, page });
+    if (!card) return notice(expired);
+    try {
+      await this.#bot.updateInteractionCard(
+        callback.replyTarget ?? entry.target,
+        String(callback.providerMessageId),
+        { markup: card.markup, text: card.text },
+      );
+      entry.page = card.page;
+      return notice(t('第 {page}/{pages} 页。', { page: card.page + 1, pages: card.pages }));
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:${this.#descriptor.key}] unable to turn the workspace card page:`,
+        error?.message ?? error,
+      );
+      return notice(t('暂时无法翻页，请稍后重试。'));
+    }
+  }
+
   /** Answer a workspace press through the current card snapshot. */
   async #handleWorkspaceCardPress(callback, key, press) {
     if (this.#signal?.aborted) return;
@@ -2322,6 +2360,7 @@ export class TextHarnessBridge {
       isCommand: true,
     });
     if (!decision.allowed) return notice(t(COMMAND_PERMISSION_DENIED_MESSAGE));
+    if (press.action === 'p') return this.#workspaceCardPage(callback, entry, press);
     const path = entry.listing?.paths?.[press.index];
     if (typeof path !== 'string') return notice(expired);
     // Claim synchronously, before the first await: a second press arriving
@@ -2348,13 +2387,18 @@ export class TextHarnessBridge {
       const current = typeof switched === 'string' && switched ? switched : path;
       // Keep the snapshot truthful: the next press compares against this value.
       entry.listing = { ...entry.listing, current };
-      const card = this.#workspaceCard.render(entry.listing, { nonce: press.nonce });
+      // Re-mark on the page the user was looking at, with the same body text:
+      // a switch must not silently send them back to page one, and an update
+      // with `text` also rewrites the heading (count/page), so pass it too.
+      const card = this.#workspaceCard.render(entry.listing, {
+        nonce: press.nonce, page: entry.page,
+      });
       if (card && typeof this.#bot.updateInteractionCard === 'function') {
         try {
           await this.#bot.updateInteractionCard(
             callback.replyTarget ?? entry.target,
             String(callback.providerMessageId),
-            { markup: card.markup },
+            { markup: card.markup, text: card.text },
           );
         } catch (error) {
           this.#logger.warn?.(

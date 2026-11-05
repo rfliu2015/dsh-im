@@ -45,7 +45,7 @@
 | A8 | 别的对话的卡片按不动 | 同上（用例 `a card from another conversation is rejected`） | `switchWorkspace` 0 次 |
 | A9 | 无命令权限的用户点击不切换，回权限提示 | 同上（用例 `a press without command permission switches nothing`） | 0 次切换；toast 为现有权限拒绝文案 |
 | A10 | 卡片发送失败时降级为原来的文字列表（不丢信息） | 同上（用例 `card delivery failure falls back to the text list`） | `sent` 含「当前 Harness Host 上存在的工作区」；不抛错 |
-| A11 | 工作区超过按钮上限时降级为文字列表 | 同上（用例 `too many workspaces falls back to text`） | 无卡片；`sent` 为文字列表 |
+| A11 | ~~工作区超过按钮上限时降级为文字列表~~ → 改为分页：任意数量都出卡，每页 8 行 + 上一页/下一页 | 同上（用例 `more than 20 workspaces render a paged card, not the text list` 等 4 个） | 25 个工作区出 4 页卡；翻页不切换；第二页按下标 9 切到 `paths[8]` |
 | A12 | `/ws 2` 与 `/ws <绝对路径>` 行为不变（直接切换 + 文字回执） | `node --test test/workspace.test.mjs` | 通过 |
 | A13 | 共享列出命令返回 `listing` 供渠道渲染，文字输出不变 | `node --test test/workspace.test.mjs`（新增用例） | 通过 |
 | A14 | Telegram 原生菜单只剩一个工作区入口，`/wsl` 等仍可用 | `node --test test/channels/telegram/command-menu.test.mjs` | 菜单含 `workspace`，不含 `workspacelist`/`workspaces`/`wsl` |
@@ -63,7 +63,10 @@
 **已知不做**：
 
 - 不做 `/conv`（对话专属工作区）的卡片化，仍为文字命令。
-- 不做卡片分页；超过 20 个工作区降级为文字列表（手机端按钮扫描成本高于翻页价值）。
+- ~~不做卡片分页；超过 20 个工作区降级为文字列表~~ → **已推翻**：实际使用中工作区增长到 25 个，
+  降级成文字列表等于 `/ws` 卡片整个消失。2026-11-05 起按会话/模型卡片的同一套 `p` 动作做分页
+  （每页 8 行、回调升级为 `w2|nonce|s|index` / `w2|nonce|p|page`，兼容旧 `w1|`）。
+  2026-11-05 晚按用户要求把每页从 20 行缩到 8 行，与会话 / 模型卡片一致。
 - 不改其他渠道（QQ/企微/微信/Slack/Discord/WhatsApp/Matrix）的呈现：它们拿到的仍是同一份文字列表，只是 `/ws` 无参数从「用法」变成「列表」，属于纯增益。
 - 不向上游 `xmanrui/dsh-im` 发 PR（等用户确认）。
 
@@ -121,13 +124,13 @@
      `workspacePathSnapshot(harness, { includeTitles: true })`，取不到时为 `{}`。
    - 有参数与其它会话命令的返回结构不变。
 2. `text-harness-bridge.mjs`
-   - 构造参数新增 `workspaceCard = null`（渠道适配器，形状：`{ render(listing,{nonce}), parse(data) }`）。
-   - 新增私有状态 `#workspaceCards: Map<nonce,{listing,key,target,createdAt,submitting}>`，
-     容量 50、TTL 1 小时，插入时惰性清理。
+   - 构造参数新增 `workspaceCard = null`（渠道适配器，形状：`{ render(listing,{nonce,page}), parse(data) }`）。
+   - 新增私有状态 `#workspaceCards: Map<nonce,{listing,key,target,page,createdAt,submitting}>`，
+     容量 50、TTL 1 小时，插入时惰性清理；`page` 记录当前页。
    - `acceptCallback` 在进入提问卡 pending 逻辑**之前**分流行 workspace 回调；布局见数据流。
 3. `telegram-bridge.mjs`
    - 导出 `TELEGRAM_WORKSPACE_CARD` 与 `parseTelegramWorkspaceCallback(data)`。
-   - 回调载荷：`w|<nonce>|<index>`，nonce 为 12 字符 base64url；按钮上限 20。
+   - 回调载荷：`w2|<nonce>|s|<index>` 切换、`w2|<nonce>|p|<page>` 翻页（兼容旧 `w1|<nonce>|<index>`）；每页 8 行，总页数不限。
 4. `shared/workspace-labels.mjs`
    - 从 `feishu-cards.mjs` 提取 `workspaceLabels()`，飞书与 Telegram 共用同一套显示名规则（title 优先、重名补父目录、22 码点省略）。
 
@@ -137,7 +140,7 @@
 | --- | --- |
 | 渠道 bot 没有 `sendInteractionCard` | 原文字列表（与现在一致） |
 | 卡片发送抛错 | 记录警告后回退文字列表；不重试卡片 |
-| 工作区数 > 20 | 直接文字列表 + 「用 /ws 序号切换」提示 |
+| 工作区数 > 8 | 分页卡片：每页 8 行 + 上一页/下一页（2026-11-05 起） |
 | 卡片 nonce 过期/未知 | toast「这个列表已过期，请重新发送 /ws。」，不切换 |
 | 切换进行中再次点击 | toast「正在切换工作区，请稍候。」，不重复切换 |
 | 切换失败 | toast「暂时无法切换工作区，请稍后重试。」，卡片保持原样（可再点） |
@@ -152,7 +155,7 @@
 | R2 卡片与文字命令共用切换/错误 helper | `workspaceSwitchFailureText()`，文字路径与卡片路径共用（A23） |
 | R3 过期卡清键盘而非只 toast | 已知 nonce 过期时 `updateInteractionCard(空键盘)` + toast（A24） |
 | R4 同对话只留一张活跃卡 | `#workspaceCardKeys` + 发送即收起上一张（A21） |
-| R5 回调命名空间版本化 | `w1|<nonce>|<index>` |
+| R5 回调命名空间版本化 | `w2|<nonce>|s|<index>`（旧 `w1|` 仍可解析） |
 | R8 幂等以实时 current 为准 | 点击前读 `harness.currentWorkspace()`（A22） |
 
 未采纳及原因：
@@ -161,7 +164,7 @@
   重排不会错切；工作区被删除时由 `switchWorkspace` 的失败分支兜底（A23 同一文案）。
 - R7「成功回执标注本对话生效」：`/workspace` 切换的是 **bot 级默认工作区**，会影响该机器人的其他对话，
   标注「本对话生效」反而误导。
-- R9 分页：见「已知不做」——超过 20 个工作区降级文字列表。
+- R9 分页：初版未采纳（超过 20 个降级文字列表），2026-11-05 因真实工作区数超限而补做，见「已知不做」。
 
 ## 测试计划（先红后绿）
 

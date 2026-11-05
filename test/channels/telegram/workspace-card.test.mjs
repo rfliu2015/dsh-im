@@ -61,8 +61,8 @@ function bridgeFixture({
         cards.push({ text, markup });
         return { providerMessageIds: [String(700 + cards.length)] };
       },
-      async updateInteractionCard(_target, messageId, { markup }) {
-        edits.push({ messageId, markup });
+      async updateInteractionCard(_target, messageId, { markup, text }) {
+        edits.push({ messageId, markup, text });
       },
       async answerInteractionCallback(queryId, text) {
         notices.push({ queryId, text });
@@ -292,12 +292,104 @@ test('card delivery failure falls back to the text list', async () => {
   assert.match(sent.join('\n'), /当前 Harness Host 上存在的工作区（2）/);
 });
 
-test('too many workspaces fall back to the text list', async () => {
-  const { paths } = await workspaceFixture(21);
+test('a page holds at most eight workspaces and longer lists get a pager', async () => {
+  const { paths } = await workspaceFixture(25);
   const { bridge, sent, cards } = bridgeFixture({ paths });
   await bridge.accept(message('/ws'));
-  assert.equal(cards.length, 0);
-  assert.match(sent.join('\n'), /当前 Harness Host 上存在的工作区（21）/);
+  assert.equal(cards.length, 1, 'the listing no longer degrades to text');
+  assert.equal(sent.length, 0, 'no duplicate text list');
+  assert.match(cards[0].text, /选择要切换的工作区（共 25 个，第 1\/4 页）/);
+  const rows = buttons(cards);
+  assert.equal(rows.length, 9, '8 workspace rows + one pager button');
+  assert.match(rows[0].text, /^✓ 1\./);
+  assert.match(rows[7].text, /^8\./);
+  assert.match(rows[8].text, /下一页/);
+});
+
+test('turning the page updates body and keyboard together', async () => {
+  const { paths } = await workspaceFixture(25);
+  const { bridge, cards, edits, switches, notices } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  const next = buttons(cards).at(-1).callback_data;
+  assert.equal(parseTelegramWorkspaceCallback(next).action, 'p');
+  await press(bridge, next);
+  assert.deepEqual(switches, [], 'paging never switches a workspace');
+  const edit = edits.at(-1);
+  assert.match(edit.text, /第 2\/4 页/);
+  assert.equal(edit.markup.inline_keyboard.length, 9, '8 rows + one pager row');
+  assert.match(edit.markup.inline_keyboard[0][0].text, /^9\./);
+  assert.match(edit.markup.inline_keyboard[7][0].text, /^16\./);
+  assert.match(edit.markup.inline_keyboard[8][0].text, /上一页/);
+  assert.match(edit.markup.inline_keyboard[8][1].text, /下一页/);
+  assert.match(notices.at(-1)?.text ?? '', /第 2\/4 页/);
+});
+
+test('a press on page two switches that absolute index, not a page-local one', async () => {
+  const { paths } = await workspaceFixture(25);
+  const { bridge, cards, edits, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  await press(bridge, buttons(cards).at(-1).callback_data);
+  const pageTwo = edits.at(-1).markup.inline_keyboard;
+  await press(bridge, pageTwo[0][0].callback_data, {
+    providerMessageId: 700,
+    callbackQueryId: 'cb-2',
+  });
+  assert.deepEqual(switches, [paths[8]], 'index 9 of the full listing');
+  // The re-mark stays on page two and moves the ✓ to the newly current row.
+  assert.match(edits.at(-1).text, /第 2\/4 页/);
+  assert.match(edits.at(-1).markup.inline_keyboard[0][0].text, /^✓ 9\./);
+  assert.doesNotMatch(edits.at(-1).markup.inline_keyboard[1][0].text, /✓/);
+});
+
+test('the last page holds only the remainder and its press switches that index', async () => {
+  const { paths } = await workspaceFixture(25);
+  const { bridge, cards, edits, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  // Page 1 -> 2 -> 3 -> 4, always following the pager in the latest keyboard.
+  for (let page = 2; page <= 4; page += 1) {
+    const keyboard = edits.length
+      ? edits.at(-1).markup.inline_keyboard
+      : cards.at(-1).markup.inline_keyboard;
+    const pager = keyboard.at(-1);
+    await press(bridge, pager.find((button) => /下一页/.test(button.text)).callback_data);
+    assert.match(edits.at(-1).text, new RegExp(`第 ${page}/4 页`));
+  }
+  const last = edits.at(-1).markup.inline_keyboard;
+  assert.equal(last.length, 2, 'one workspace row + the pager row');
+  assert.match(last[0][0].text, /^25\./);
+  assert.match(last[1][0].text, /上一页/);
+  await press(bridge, last[0][0].callback_data, {
+    providerMessageId: 700,
+    callbackQueryId: 'cb-2',
+  });
+  assert.deepEqual(switches, [paths[24]]);
+});
+
+test('pressing the pager for the page already shown is a no-op', async () => {
+  const { paths } = await workspaceFixture(25);
+  const { bridge, cards, edits, notices, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  await press(bridge, buttons(cards).at(-1).callback_data);
+  const editsAfterFirstTurn = edits.length;
+  await press(bridge, 'w2|' + buttons(cards).at(-1).callback_data.split('|')[1] + '|p|1');
+  assert.equal(edits.length, editsAfterFirstTurn, 'no redundant edit');
+  assert.deepEqual(switches, []);
+  assert.match(notices.at(-1)?.text ?? '', /已经是这一页/);
+});
+
+test('the w2 payload parses both actions and the legacy w1 payload still parses', () => {
+  assert.deepEqual(parseTelegramWorkspaceCallback('w2|abc|s|21'), {
+    nonce: 'abc', action: 's', index: 21,
+  });
+  assert.deepEqual(parseTelegramWorkspaceCallback('w2|abc|p|1'), {
+    nonce: 'abc', action: 'p', index: 1,
+  });
+  assert.deepEqual(parseTelegramWorkspaceCallback('w1|abc|7'), {
+    nonce: 'abc', action: 's', index: 7,
+  });
+  assert.equal(parseTelegramWorkspaceCallback('w2|abc|x|1'), null);
+  assert.equal(parseTelegramWorkspaceCallback('w2|abc|s'), null, 'a switch needs an index');
+  assert.equal(parseTelegramWorkspaceCallback('w3|abc|s|1'), null);
 });
 
 test('a switch failure reuses the typed command failure text', async () => {
