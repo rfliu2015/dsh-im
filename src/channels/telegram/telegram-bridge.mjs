@@ -2,6 +2,7 @@ import { harnessQuestionText } from '../shared/harness-question.mjs';
 import { t } from '../shared/i18n.mjs';
 import { TextHarnessBridge, createTextBridgeStatus } from '../shared/text-harness-bridge.mjs';
 import { workspaceLabels } from '../shared/workspace-labels.mjs';
+import { workspaceTree } from '../shared/workspace-tree.mjs';
 import { TelegramApprovalCard } from './approval-card.mjs';
 
 export const TELEGRAM_DESCRIPTOR = Object.freeze({
@@ -88,28 +89,28 @@ const MAX_WORKSPACE_BUTTONS = 8;
  * Encode one workspace-card press.
  *
  * A path cannot ride in `callback_data` (64-byte budget), so a press carries a
- * presentation nonce plus an action: `s` switches to an index into the cached
- * snapshot, `p` turns to a page. The index is the position in `listing.paths`,
- * not a position on the visible page, so a press on page two names the same
- * workspace the text list numbers.
+ * presentation nonce plus an action: `s` switch to an absolute index, `p` page,
+ * `d` drill into that index's children, `u` go up one level, `v` toggle between
+ * the tree and the flat list. The number is always an index into the cached
+ * `listing.paths` (or `-1` for "root"), never a position on the visible page.
  */
 function workspaceCardCallbackData(nonce, action, argument) {
-  // Versioned namespace (upstream convention, cf. openclaw tga1:/tgq1:): a
-  // future payload change can tell an old card apart instead of mis-parsing it.
-  // `w1` was the index-only payload; `w2` adds the action.
-  const payload = `w2|${nonce}|${action}`;
+  // `w1` was index-only; `w2` added s/p; `w3` adds the tree actions. Old
+  // payloads keep parsing so a keyboard already delivered stays usable.
+  const payload = `w3|${nonce}|${action}`;
   return argument === undefined ? payload : `${payload}|${argument}`;
 }
 
 /** Parse a workspace-card press; null for foreign payloads. */
 export function parseTelegramWorkspaceCallback(data) {
   if (typeof data !== 'string') return null;
-  const match = /^w2\|([A-Za-z0-9_-]{1,16})\|([sp])\|(\d{1,4})$/u.exec(data);
+  const match = /^w3\|([A-Za-z0-9_-]{1,16})\|([spduv])\|(-?\d{1,4})$/u.exec(data);
   if (match) {
     return { nonce: match[1], action: match[2], index: Number(match[3]) };
   }
-  // A card delivered before paging existed named a switch by index alone. Keep
-  // it working rather than leaving an old keyboard with an unparseable press.
+  const v2 = /^w2\|([A-Za-z0-9_-]{1,16})\|([sp])\|(\d{1,4})$/u.exec(data);
+  if (v2) return { nonce: v2[1], action: v2[2], index: Number(v2[3]) };
+  // A card delivered before paging existed named a switch by index alone.
   const legacy = /^w1\|([A-Za-z0-9_-]{1,16})\|(\d{1,3})$/u.exec(data);
   return legacy ? { nonce: legacy[1], action: 's', index: Number(legacy[2]) } : null;
 }
@@ -117,53 +118,84 @@ export function parseTelegramWorkspaceCallback(data) {
 /**
  * Inline-keyboard presentation for the merged `/ws` listing.
  *
- * The body deliberately states only count and page, never which workspace is
- * current: a switch elsewhere can change the current workspace while this card
- * is on screen. The ✓ marker lives in the keyboard and is re-marked in place.
+ * Two views over ONE snapshot. `tree` shows only the direct children of
+ * `parent` (roots when parent is null), so the reader walks level by level;
+ * `flat` is the original all-workspaces list. A node that owns children gets a
+ * "▸" drill button as well as its own switch button — a parent is itself a
+ * valid workspace and must stay selectable.
+ *
+ * The body states count and page, never "current is X": a switch elsewhere can
+ * change the current workspace while this card is on screen. The ✓ marker
+ * lives in the keyboard and is re-marked in place.
  */
 export const TELEGRAM_WORKSPACE_CARD = Object.freeze({
-  render(listing, { nonce, page = 0 } = {}) {
+  render(listing, { nonce, page = 0, view = 'tree', parent = null } = {}) {
     if (typeof nonce !== 'string' || !nonce) return null;
     const paths = Array.isArray(listing?.paths) ? listing.paths : [];
     if (paths.length === 0) return null;
-    const pages = Math.max(1, Math.ceil(paths.length / MAX_WORKSPACE_BUTTONS));
+    const tree = workspaceTree(paths);
+    const activeView = view === 'flat' ? 'flat' : (tree.hasHierarchy ? 'tree' : 'flat');
+    const owned = activeView === 'tree' ? tree.childrenOf(parent) : paths.map((_p, i) => i);
+    if (owned.length === 0) return null;
+    const pages = Math.max(1, Math.ceil(owned.length / MAX_WORKSPACE_BUTTONS));
     const current = Number.isSafeInteger(page) && page >= 0 && page < pages ? page : 0;
     const start = current * MAX_WORKSPACE_BUTTONS;
     const currentPath = typeof listing?.current === 'string' ? listing.current : null;
     const labels = workspaceLabels(paths, listing?.titles ?? {});
-    const keyboard = paths.slice(start, start + MAX_WORKSPACE_BUTTONS).map((path, offset) => {
-      const index = start + offset;
-      return [{
+    const keyboard = owned.slice(start, start + MAX_WORKSPACE_BUTTONS).map((index) => {
+      const path = paths[index];
+      const row = [{
         text: `${path === currentPath ? '✓ ' : ''}${index + 1}. ${labels[index].label}`,
         callback_data: workspaceCardCallbackData(nonce, 's', index),
       }];
+      if (activeView === 'tree' && tree.childCount(index) > 0) {
+        row.push({
+          text: t('▸ 下级'),
+          callback_data: workspaceCardCallbackData(nonce, 'd', index),
+        });
+      }
+      return row;
     });
-    // Only pages that exist get a button, so Telegram never sees an identical
-    // keyboard edit (which it rejects as "message is not modified").
-    const pager = [];
+    // Navigation row: back up one level while in the tree, then the pager, then
+    // the view toggle. Only buttons that lead somewhere are offered.
+    const nav = [];
+    if (activeView === 'tree' && parent !== null) {
+      nav.push({
+        text: t('⬆ 上级'),
+        callback_data: workspaceCardCallbackData(nonce, 'u', tree.parentOf(parent) ?? -1),
+      });
+    }
+    if (tree.hasHierarchy) {
+      nav.push({
+        text: activeView === 'tree' ? t('平铺列表') : t('按层级'),
+        callback_data: workspaceCardCallbackData(nonce, 'v', activeView === 'tree' ? 1 : 0),
+      });
+    }
     if (current > 0) {
-      pager.push({
+      nav.push({
         text: t('上一页'),
         callback_data: workspaceCardCallbackData(nonce, 'p', current - 1),
       });
     }
     if (current < pages - 1) {
-      pager.push({
+      nav.push({
         text: t('下一页'),
         callback_data: workspaceCardCallbackData(nonce, 'p', current + 1),
       });
     }
-    if (pager.length > 0) keyboard.push(pager);
+    if (nav.length > 0) keyboard.push(nav);
     const heading = pages > 1
       ? t('选择要切换的工作区（共 {count} 个，第 {page}/{pages} 页）：', {
-        count: paths.length, page: current + 1, pages,
+        count: owned.length, page: current + 1, pages,
       })
-      : t('选择要切换的工作区（共 {count} 个）：', { count: paths.length });
+      : t('选择要切换的工作区（共 {count} 个）：', { count: owned.length });
     return {
       text: heading,
       markup: { inline_keyboard: keyboard },
       page: current,
       pages,
+      view: activeView,
+      parent: activeView === 'tree' ? parent : null,
     };
   },
   parse: parseTelegramWorkspaceCallback,

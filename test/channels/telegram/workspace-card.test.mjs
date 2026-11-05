@@ -26,6 +26,25 @@ async function workspaceFixture(count = 3) {
   return { root, paths };
 }
 
+/**
+ * A hierarchy with three levels. The intermediate `demands` folder is NOT a
+ * registered workspace, exactly like DSH's real data, so `child-*` must attach
+ * to `parent` as its nearest registered ancestor.
+ */
+async function treeFixture() {
+  const { root } = await workspaceFixture(1);
+  const parent = join(root, 'parent');
+  const other = join(root, 'other-root');
+  const leaf = join(root, 'leaf-root');
+  const childA = join(parent, 'demands', 'child-a');
+  const childB = join(parent, 'demands', 'child-b');
+  const grandchild = join(childA, 'grandchild');
+  for (const path of [parent, other, leaf, childA, childB, grandchild]) {
+    await mkdir(path, { recursive: true });
+  }
+  return { paths: [parent, other, leaf, childA, childB, grandchild] };
+}
+
 function stateFixture() {
   const seen = new Set();
   return {
@@ -377,7 +396,16 @@ test('pressing the pager for the page already shown is a no-op', async () => {
   assert.match(notices.at(-1)?.text ?? '', /已经是这一页/);
 });
 
-test('the w2 payload parses both actions and the legacy w1 payload still parses', () => {
+test('the w3 tree payload parses every action and older payloads still parse', () => {
+  for (const [data, action, index] of [
+    ['w3|abc|s|21', 's', 21],
+    ['w3|abc|p|1', 'p', 1],
+    ['w3|abc|d|3', 'd', 3],
+    ['w3|abc|u|-1', 'u', -1],
+    ['w3|abc|v|1', 'v', 1],
+  ]) {
+    assert.deepEqual(parseTelegramWorkspaceCallback(data), { nonce: 'abc', action, index });
+  }
   assert.deepEqual(parseTelegramWorkspaceCallback('w2|abc|s|21'), {
     nonce: 'abc', action: 's', index: 21,
   });
@@ -387,9 +415,10 @@ test('the w2 payload parses both actions and the legacy w1 payload still parses'
   assert.deepEqual(parseTelegramWorkspaceCallback('w1|abc|7'), {
     nonce: 'abc', action: 's', index: 7,
   });
-  assert.equal(parseTelegramWorkspaceCallback('w2|abc|x|1'), null);
-  assert.equal(parseTelegramWorkspaceCallback('w2|abc|s'), null, 'a switch needs an index');
-  assert.equal(parseTelegramWorkspaceCallback('w3|abc|s|1'), null);
+  assert.equal(parseTelegramWorkspaceCallback('w3|abc|x|1'), null);
+  assert.equal(parseTelegramWorkspaceCallback('w3|abc|s'), null, 'an action needs its number');
+  assert.equal(parseTelegramWorkspaceCallback('w3|abc|d|x'), null);
+  assert.equal(parseTelegramWorkspaceCallback('w4|abc|s|1'), null);
 });
 
 test('a switch failure reuses the typed command failure text', async () => {
@@ -474,4 +503,118 @@ test('/ws with an argument keeps the direct-switch text behavior', async () => {
   await bridge.accept(message('/ws 2'));
   assert.equal(cards.length, 0);
   assert.match(sent.join('\n'), /工作区已切换为/);
+});
+
+// --- Tree view -------------------------------------------------------------
+
+function rowsOf(keyboard) { return keyboard.flat(); }
+function findButton(keyboard, text) {
+  return rowsOf(keyboard).find((button) => button.text.includes(text));
+}
+
+test('/ws with a hierarchy opens on roots only, with a drill and a flat-list toggle', async () => {
+  const { paths } = await treeFixture();
+  const { bridge, cards } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+
+  assert.equal(cards.length, 1);
+  const keyboard = cards[0].markup.inline_keyboard;
+  // 3 roots + 1 nav row. The parent is both selectable and drillable.
+  assert.equal(keyboard.length, 4);
+  assert.match(keyboard[0][0].text, /^✓ 1\./);
+  assert.match(keyboard[0][1].text, /▸ 下级/);
+  assert.ok(findButton(keyboard, '平铺列表'));
+  for (const row of keyboard.slice(0, 3)) {
+    assert.equal(parseTelegramWorkspaceCallback(row[0].callback_data).action, 's');
+  }
+  assert.match(cards[0].text, /共 3 个/);
+});
+
+test('drilling down shows only that node\'s children and offers a way back up', async () => {
+  const { paths } = await treeFixture();
+  const { bridge, cards, edits, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  const drill = findButton(cards[0].markup.inline_keyboard, '▸ 下级').callback_data;
+  assert.equal(parseTelegramWorkspaceCallback(drill).action, 'd');
+  await press(bridge, drill);
+
+  assert.deepEqual(switches, [], 'drilling never switches');
+  const keyboard = edits.at(-1).markup.inline_keyboard;
+  // child-a, child-b (grandchild is one level deeper) + nav row.
+  assert.equal(keyboard.length, 3);
+  assert.match(keyboard[0][0].text, /^4\./, 'child-a is index 3 in the full listing');
+  assert.match(keyboard[1][0].text, /^5\./, 'child-b is index 4');
+  assert.ok(findButton(keyboard, '⬆ 上级'));
+  assert.match(edits.at(-1).text, /共 2 个/);
+});
+
+test('a three-level walk stays on absolute indices all the way down', async () => {
+  const { paths } = await treeFixture();
+  const { bridge, cards, edits, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  await press(bridge, findButton(cards[0].markup.inline_keyboard, '▸ 下级').callback_data);
+  const secondDrill = findButton(edits.at(-1).markup.inline_keyboard, '▸ 下级').callback_data;
+  await press(bridge, secondDrill, { providerMessageId: 700, callbackQueryId: 'cb-2' });
+
+  const keyboard = edits.at(-1).markup.inline_keyboard;
+  assert.equal(keyboard.length, 2, 'grandchild row + nav row');
+  assert.match(keyboard[0][0].text, /^6\./, 'the 6th path in the original listing');
+  await press(bridge, keyboard[0][0].callback_data, {
+    providerMessageId: 700, callbackQueryId: 'cb-3',
+  });
+  assert.deepEqual(switches, [paths[5]]);
+});
+
+test('the up button returns to the parent level', async () => {
+  const { paths } = await treeFixture();
+  const { bridge, cards, edits } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  await press(bridge, findButton(cards[0].markup.inline_keyboard, '▸ 下级').callback_data);
+  const up = findButton(edits.at(-1).markup.inline_keyboard, '⬆ 上级').callback_data;
+  await press(bridge, up, { providerMessageId: 700, callbackQueryId: 'cb-2' });
+
+  const keyboard = edits.at(-1).markup.inline_keyboard;
+  assert.equal(keyboard.length, 4, 'back to the 3 roots + nav');
+  assert.match(keyboard[0][0].text, /^✓ 1\./);
+});
+
+test('the flat-list toggle shows every workspace and toggles back', async () => {
+  const { paths } = await treeFixture();
+  const { bridge, cards, edits, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  const toFlat = findButton(cards[0].markup.inline_keyboard, '平铺列表').callback_data;
+  await press(bridge, toFlat);
+
+  assert.deepEqual(switches, []);
+  const flat = edits.at(-1).markup.inline_keyboard;
+  assert.equal(flat.length, 7, '6 workspaces + nav row');
+  assert.ok(findButton(flat, '按层级'));
+  await press(bridge, findButton(flat, '按层级').callback_data, {
+    providerMessageId: 700, callbackQueryId: 'cb-2',
+  });
+  assert.equal(edits.at(-1).markup.inline_keyboard.length, 4, 'back to 3 roots + nav');
+});
+
+test('a flat listing with no hierarchy stays flat and has no view toggle', async () => {
+  const { paths } = await workspaceFixture(3);
+  const { bridge, cards } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+
+  const keyboard = cards[0].markup.inline_keyboard;
+  assert.equal(keyboard.length, 3, 'one row per workspace, no nav row');
+  assert.equal(findButton(keyboard, '平铺列表'), undefined);
+  assert.equal(findButton(keyboard, '▸ 下级'), undefined);
+});
+
+test('a switch from a drilled-in card keeps the tree level in its re-mark', async () => {
+  const { paths } = await treeFixture();
+  const { bridge, cards, edits, switches } = bridgeFixture({ paths });
+  await bridge.accept(message('/ws'));
+  await press(bridge, findButton(cards[0].markup.inline_keyboard, '▸ 下级').callback_data);
+  const child = edits.at(-1).markup.inline_keyboard[0][0].callback_data;
+  await press(bridge, child, { providerMessageId: 700, callbackQueryId: 'cb-2' });
+
+  assert.deepEqual(switches, [paths[3]], 'child-a, not the leaf at index 2');
+  assert.match(edits.at(-1).text, /共 2 个/, 'still on the children level');
+  assert.match(edits.at(-1).markup.inline_keyboard[0][0].text, /^✓ 4\./);
 });

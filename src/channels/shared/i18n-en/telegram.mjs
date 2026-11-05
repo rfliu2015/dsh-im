@@ -31,6 +31,16 @@ export default {
   '正在切换工作区，请稍候。': 'Switching Workspaces, one moment.',
   '已经在工作区：{workspace}': 'Already in this Workspace: {workspace}',
   '暂时无法切换工作区，请稍后重试。': 'Could not switch Workspaces right now. Try again later.',
+  // /ws tree view: walk registered ancestors level by level, or show every
+  // workspace at once. A parent is itself selectable and also has a drill button.
+  '▸ 下级': '▸ Children',
+  '⬆ 上级': '⬆ Up',
+  '平铺列表': 'Flat list',
+  '按层级': 'By level',
+  '已进入下级工作区。': 'Showing child Workspaces.',
+  '已返回上级工作区。': 'Back to the parent level.',
+  '已切换为平铺列表。': 'Switched to the flat list.',
+  '已切换为层级浏览。': 'Switched to the level view.',
   // Session card: the workspace picker's second message, one row per Session.
   '选择要绑定的会话（共 {count} 个）：': 'Choose a Session to bind ({count} total):',
   '新增会话': 'New Session',

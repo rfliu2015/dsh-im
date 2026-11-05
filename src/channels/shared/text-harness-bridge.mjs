@@ -2235,13 +2235,15 @@ export class TextHarnessBridge {
       || typeof this.#workspaceCard?.render !== 'function'
       || typeof this.#bot.sendInteractionCard !== 'function') return false;
     const nonce = randomBytes(WORKSPACE_CARD_NONCE_BYTES).toString('base64url');
-    const card = this.#workspaceCard.render(listing, { nonce, page: 0 });
+    const card = this.#workspaceCard.render(listing, { nonce, page: 0, view: 'tree', parent: null });
     if (!card) return false;
     const entry = {
       listing,
       key: conversationKey,
       target,
       page: card.page ?? 0,
+      view: card.view ?? 'tree',
+      parent: card.parent ?? null,
       createdAt: Date.now(),
       submitting: false,
     };
@@ -2311,18 +2313,23 @@ export class TextHarnessBridge {
   }
 
   /**
-   * Show another page of the same workspace snapshot. Body and keyboard move
-   * together so the page number cannot disagree with the buttons; the nonce,
-   * the listing, and therefore every absolute index stay identical, so a press
-   * on page two switches the workspace the full text list numbers there.
+   * Re-render the same snapshot in a different state (page, view or tree
+   * level). Body and keyboard move together so the page number and the buttons
+   * cannot disagree; the nonce, the listing, and therefore every absolute index
+   * stay identical, so a press anywhere names the same workspace the text list
+   * numbers there.
    */
-  async #workspaceCardPage(callback, entry, press) {
+  async #workspaceCardNavigate(callback, entry, press, {
+    page = entry.page, view = entry.view, parent = entry.parent,
+    unchanged = null, noticeText = null,
+  } = {}) {
     const notice = (text) => this.#answerInteractionCallback(callback, text);
     const expired = t('这个列表已过期，请重新发送 /ws。');
     if (typeof this.#bot.updateInteractionCard !== 'function') return notice(expired);
-    const page = press.index ?? 0;
-    if (page === entry.page) return notice(t('已经是这一页了。'));
-    const card = this.#workspaceCard.render(entry.listing, { nonce: press.nonce, page });
+    if (unchanged !== null) return notice(unchanged);
+    const card = this.#workspaceCard.render(entry.listing, {
+      nonce: press.nonce, page, view, parent,
+    });
     if (!card) return notice(expired);
     try {
       await this.#bot.updateInteractionCard(
@@ -2331,14 +2338,52 @@ export class TextHarnessBridge {
         { markup: card.markup, text: card.text },
       );
       entry.page = card.page;
-      return notice(t('第 {page}/{pages} 页。', { page: card.page + 1, pages: card.pages }));
+      entry.view = card.view;
+      entry.parent = card.parent;
+      return notice(noticeText ?? t('第 {page}/{pages} 页。', {
+        page: card.page + 1, pages: card.pages,
+      }));
     } catch (error) {
       this.#logger.warn?.(
-        `[dsh-im:${this.#descriptor.key}] unable to turn the workspace card page:`,
+        `[dsh-im:${this.#descriptor.key}] unable to update the workspace card:`,
         error?.message ?? error,
       );
       return notice(t('暂时无法翻页，请稍后重试。'));
     }
+  }
+
+  async #workspaceCardPage(callback, entry, press) {
+    const page = press.index ?? 0;
+    return this.#workspaceCardNavigate(callback, entry, press, {
+      page,
+      unchanged: page === entry.page ? t('已经是这一页了。') : null,
+    });
+  }
+
+  /** d: descend into a node's children. u: back to its parent. v: toggle view. */
+  async #workspaceCardTree(callback, entry, press) {
+    const notice = (text) => this.#answerInteractionCallback(callback, text);
+    if (press.action === 'd' && entry.view !== 'tree') {
+      return notice(t('这个列表已过期，请重新发送 /ws。'));
+    }
+    let view = entry.view;
+    let parent = entry.parent;
+    let noticeText = null;
+    if (press.action === 'd') {
+      parent = Number.isSafeInteger(press.index) ? press.index : null;
+      noticeText = t('已进入下级工作区。');
+    } else if (press.action === 'u') {
+      parent = Number.isSafeInteger(press.index) && press.index >= 0 ? press.index : null;
+      noticeText = t('已返回上级工作区。');
+    } else {
+      view = press.index === 1 ? 'flat' : 'tree';
+      parent = null;
+      noticeText = view === 'flat' ? t('已切换为平铺列表。') : t('已切换为层级浏览。');
+    }
+    // Any level change starts at page one and never changes the switch indices.
+    return this.#workspaceCardNavigate(callback, entry, press, {
+      page: 0, view, parent, noticeText,
+    });
   }
 
   /** Answer a workspace press through the current card snapshot. */
@@ -2372,6 +2417,9 @@ export class TextHarnessBridge {
     });
     if (!decision.allowed) return notice(t(COMMAND_PERMISSION_DENIED_MESSAGE));
     if (press.action === 'p') return this.#workspaceCardPage(callback, entry, press);
+    if (press.action === 'd' || press.action === 'u' || press.action === 'v') {
+      return this.#workspaceCardTree(callback, entry, press);
+    }
     const path = entry.listing?.paths?.[press.index];
     if (typeof path !== 'string') return notice(expired);
     // Claim synchronously, before the first await: a second press arriving
@@ -2402,7 +2450,7 @@ export class TextHarnessBridge {
       // a switch must not silently send them back to page one, and an update
       // with `text` also rewrites the heading (count/page), so pass it too.
       const card = this.#workspaceCard.render(entry.listing, {
-        nonce: press.nonce, page: entry.page,
+        nonce: press.nonce, page: entry.page, view: entry.view, parent: entry.parent,
       });
       if (card && typeof this.#bot.updateInteractionCard === 'function') {
         try {
