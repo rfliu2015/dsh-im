@@ -1,4 +1,5 @@
 import { BusyMessageDispatcher, canAutomaticallySteer } from './busy-message-dispatcher.mjs';
+import { getDeliverySyncSettingsStore } from './delivery-sync-settings-store.mjs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -265,6 +266,9 @@ export class TextHarnessBridge {
   #externalCard;
   // /notify reads and writes the per-target Session sync this service owns.
   #deliveryService;
+  // Plugin-global delivery switches. `always` also opens the master switch;
+  // the coordinator reads the same store, so both must address one document.
+  #deliverySyncStore;
   #botId;
   // Workspace picker snapshots by nonce: the press carries an index, not a path.
   #workspaceCards = new Map();
@@ -333,6 +337,7 @@ export class TextHarnessBridge {
     dshHome: dshHomeOption = null,
     settings = null,
     deliveryService = null,
+    deliverySyncStore = null,
     botId = null,
     approvalCard = null,
     approvalTimeoutMs,
@@ -389,6 +394,12 @@ export class TextHarnessBridge {
     }
     this.#settings = settings ?? null;
     this.#deliveryService = deliveryService ?? null;
+    // Fall back to the one store the settings RPC and the Session sync
+    // coordinator also use, keyed by this Host's DSH home. A caller that
+    // supplies its own (tests, or a Host with a different settings owner)
+    // overrides it; either way /notify and the coordinator see one document.
+    this.#deliverySyncStore = deliverySyncStore
+      ?? getDeliverySyncSettingsStore({ dshHome: this.#dshHome });
     this.#botId = typeof botId === 'string' && botId ? botId : null;
     this.#approvalCard = approvalCard ?? null;
     // Opt-in follow-up lanes for channels whose groups run on rapid consecutive
@@ -3148,10 +3159,13 @@ export class TextHarnessBridge {
   /**
    * /notify — whether turns started outside this chat are mirrored here.
    *
-   * 'default' leaves the chat alone: only what this bot itself answers comes
-   * back. 'always' turns on the per-target Session sync the settings page also
-   * writes, so a turn started in DSH also lands here. The two names describe the
-   * reader's intent; underneath there is one stored setting, never a second one.
+   * Two layers, both required for a turn started in DSH to reach this chat:
+   * the plugin-global `deliverModelAnswers` master switch (v5.10.0) and this
+   * chat's per-target Session sync. 'always' opens both; 'default' closes only
+   * the per-target one, leaving the master alone — it is a master, not a
+   * per-chat preference, so another chat's /notify always must not be undone.
+   * `mirrorUserInput` is deliberately never written: this command mirrors
+   * answers only, never the desktop user's question (REQ-003 decision 2).
    */
   async #runNotifyCommand(command, target, conversationKey) {
     const usage = t('用法：/notify [always|default]');
@@ -3195,6 +3209,14 @@ export class TextHarnessBridge {
       return t('这个聊天还不能同步会话：请先在此对话中发送一条消息建立会话，再试一次。');
     }
     try {
+      if (argument === 'always') {
+        // The coordinator refuses every delivered answer while this master
+        // switch is off, so turning on only the target would report success
+        // without ever delivering. Open the master FIRST: if either write
+        // fails, no state claims to be on. A partial patch leaves
+        // mirrorUserInput and both icons exactly as the settings page left them.
+        await this.#deliverySyncStore.set({ deliverModelAnswers: true });
+      }
       await service.setSessionSync(botId, match.targetId, argument === 'always');
     } catch {
       return t('暂时无法修改通知设置，请稍后重试。');

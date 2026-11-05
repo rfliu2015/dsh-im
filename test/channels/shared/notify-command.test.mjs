@@ -31,7 +31,31 @@ function target({ targetId = 'tgt_1', chatId = '424242424', enabled = false, sta
   return { targetId, kind: 'chat', route: { chatId }, sessionSync: { enabled, state } };
 }
 
-function bridgeFor({ deliveryService = null, botId = 'bot_1', chatId = '424242424' } = {}) {
+/**
+ * The plugin-global delivery switches. `set` records the patch so a test can
+ * assert /notify touched only deliverModelAnswers and never the input mirror.
+ */
+function syncStoreFixture({ fail = false, initial = null } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async get() {
+      return initial ?? {
+        mirrorUserInput: false, deliverModelAnswers: false, inputIcon: '', modelIcon: '',
+      };
+    },
+    async set(patch) {
+      calls.push(patch);
+      if (fail) throw new Error('settings write failed');
+      return { ...(initial ?? {}), ...patch };
+    },
+  };
+}
+
+function bridgeFor({ deliveryService = null, deliverySyncStore, botId = 'bot_1', chatId = '424242424' } = {}) {
+  // Always inject a store: the default singleton would write the real
+  // ~/.dsh/integrations/dsh-im/delivery-sync-settings.json from a unit test.
+  const store = deliverySyncStore === undefined ? syncStoreFixture() : deliverySyncStore;
   const sent = [];
   const bridge = new TextHarnessBridge({
     descriptor: { key: 'telegram', label: 'Telegram' },
@@ -46,6 +70,7 @@ function bridgeFor({ deliveryService = null, botId = 'bot_1', chatId = '42424242
       sessionFor() { return null; },
     },
     deliveryService,
+    deliverySyncStore: store,
     botId,
   });
   let seq = 0;
@@ -81,24 +106,42 @@ test('/notify reports always when the target already syncs', async () => {
   assert.match(fixture.sent.at(-1), /当前模式：always/);
 });
 
-test('/notify always turns on sync for the target of this chat', async () => {
+test('/notify always opens the global master switch and this chat\'s target', async () => {
   const service = serviceFixture({ targets: [target({ enabled: false })] });
-  const fixture = bridgeFor({ deliveryService: service });
+  const store = syncStoreFixture();
+  const fixture = bridgeFor({ deliveryService: service, deliverySyncStore: store });
   await fixture.accept('/notify always');
 
+  assert.deepEqual(store.calls, [{ deliverModelAnswers: true }],
+    'only the master switch is written; mirrorUserInput and icons stay untouched');
   assert.deepEqual(service.calls.at(-1), {
     op: 'setSessionSync', botId: 'bot_1', targetId: 'tgt_1', enabled: true,
   });
   assert.match(fixture.sent.at(-1), /已开启/);
 });
 
-test('/notify default turns sync off without needing a target lookup match', async () => {
+test('/notify default closes only the target and leaves the master switch alone', async () => {
   const service = serviceFixture({ targets: [target({ enabled: true })] });
-  const fixture = bridgeFor({ deliveryService: service });
+  const store = syncStoreFixture({ initial: {
+    mirrorUserInput: false, deliverModelAnswers: true, inputIcon: '📥', modelIcon: '🤖',
+  } });
+  const fixture = bridgeFor({ deliveryService: service, deliverySyncStore: store });
   await fixture.accept('/notify default');
 
+  assert.deepEqual(store.calls, [], 'the master is not a per-chat preference');
   assert.equal(service.calls.at(-1).enabled, false);
   assert.match(fixture.sent.at(-1), /已关闭/);
+});
+
+test('/notify always never enables the Web-input mirror or changes the icons', async () => {
+  const service = serviceFixture({ targets: [target()] });
+  const store = syncStoreFixture({ initial: {
+    mirrorUserInput: false, deliverModelAnswers: false, inputIcon: 'A', modelIcon: 'B',
+  } });
+  const fixture = bridgeFor({ deliveryService: service, deliverySyncStore: store });
+  await fixture.accept('/notify always');
+
+  assert.deepEqual(store.calls, [{ deliverModelAnswers: true }]);
 });
 
 test('/notify always explains how to create a missing target', async () => {
@@ -143,9 +186,21 @@ test('a failing lookup or write is reported, never swallowed', async () => {
 
   const setFails = bridgeFor({
     deliveryService: serviceFixture({ targets: [target()], fail: 'set' }),
+    deliverySyncStore: syncStoreFixture(),
   });
   await setFails.accept('/notify always');
   assert.match(setFails.sent.at(-1), /暂时无法修改通知设置/);
+});
+
+test('a failing master-switch write blocks the target write and reports the failure', async () => {
+  const service = serviceFixture({ targets: [target()] });
+  const store = syncStoreFixture({ fail: true });
+  const fixture = bridgeFor({ deliveryService: service, deliverySyncStore: store });
+  await fixture.accept('/notify always');
+
+  assert.ok(!service.calls.some((call) => call.op === 'setSessionSync'),
+    'no state claims to be on when the master switch could not be opened');
+  assert.match(fixture.sent.at(-1), /暂时无法修改通知设置/);
 });
 
 test('/notify only matches the target for the chat it was sent from', async () => {
